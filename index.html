@@ -1,0 +1,1563 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>灯语 · Lantern Whisper</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#04040c;overflow:hidden;
+    font-family:'Courier New',Consolas,monospace;color:#e8dfc0;user-select:none;
+    -webkit-tap-highlight-color:transparent;touch-action:none;}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(circle at 50% 40%,#0a0a1e 0%,#04040c 80%);}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;display:block;
+    box-shadow:0 0 80px rgba(255,170,60,0.08),0 0 20px rgba(0,0,0,0.9);}
+  #touch{position:fixed;left:0;right:0;bottom:0;padding:12px 16px 24px;
+    display:none;justify-content:space-between;align-items:flex-end;pointer-events:none;z-index:10;}
+  #touch>*{pointer-events:auto;}
+  .dpad{display:grid;grid-template-columns:repeat(3,48px);grid-template-rows:repeat(3,48px);gap:4px;}
+  .dpad div{width:48px;height:48px;}
+  .dpad button{width:48px;height:48px;background:rgba(255,200,100,0.12);
+    border:1px solid rgba(255,200,100,0.35);color:#ffcc66;font-size:18px;
+    border-radius:8px;font-family:inherit;}
+  .dpad button:active{background:rgba(255,200,100,0.3);}
+  .acts{display:flex;gap:12px;}
+  .acts button{width:64px;height:64px;border-radius:50%;
+    background:rgba(255,200,100,0.12);border:1px solid rgba(255,200,100,0.4);
+    color:#ffcc66;font-size:12px;font-weight:bold;font-family:inherit;
+    display:flex;align-items:center;justify-content:center;line-height:1.1;}
+  .acts button:active{background:rgba(255,200,100,0.35);}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="480" height="300"></canvas></div>
+<div id="touch">
+  <div class="dpad">
+    <div></div><button data-k="up">▲</button><div></div>
+    <button data-k="left">◀</button><div></div><button data-k="right">▶</button>
+    <div></div><button data-k="down">▼</button><div></div>
+  </div>
+  <div class="acts">
+    <button data-k="pulse">光语</button>
+    <button data-k="flare">燃油</button>
+  </div>
+</div>
+<script>
+'use strict';
+/* ============================================================
+   灯语 · Lantern Whisper
+   A pixel art night watchman game.
+   ============================================================ */
+
+/* ---------- 0. 基础工具 ---------- */
+const GW = 480, GH = 300;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+function fitCanvas(){
+  const availW = window.innerWidth - 24;
+  const availH = window.innerHeight - 24;
+  let s = Math.min(availW/GW, availH/GH);
+  if (s >= 1) s = Math.floor(s * 2) / 2;
+  canvas.style.width  = Math.floor(GW*s)+'px';
+  canvas.style.height = Math.floor(GH*s)+'px';
+}
+window.addEventListener('resize', fitCanvas);
+fitCanvas();
+
+const TAU = Math.PI*2;
+const rand = (a,b)=>a+Math.random()*(b-a);
+const randInt = (a,b)=>Math.floor(rand(a,b+1));
+const choose = arr=>arr[randInt(0,arr.length-1)];
+const clamp = (v,a,b)=>v<a?a:v>b?b:v;
+const lerp = (a,b,t)=>a+(b-a)*t;
+const dist2 = (ax,ay,bx,by)=>{const dx=ax-bx,dy=ay-by;return dx*dx+dy*dy;};
+const dist = (ax,ay,bx,by)=>Math.hypot(ax-bx,ay-by);
+const easeOut = t=>1-(1-t)*(1-t);
+
+/* ---------- 1. 调色板 ---------- */
+const C = {
+  skyTop:'#04040c', skyMid:'#0b0b20', skyLow:'#181026',
+  moon:'#f0e8c8', moonHalo:'rgba(240,232,200,0.18)',
+  hillFar:'#0d0a18', hillNear:'#0a0712',
+  ground:'#100c18', ground2:'#151020', grass:'#1a1424',
+  treeTrunk:'#0a0810', treeLeaf:'#0d0a18', treeLeafHi:'#141024',
+  rock:'#181420', bush:'#121020',
+  house:'#0f0a14', houseRoof:'#1a1218',
+  windowGlow:'#ff9933', windowDim:'#3a1e08',
+  playerCloak:'#2a1810', playerCloakHi:'#3a2418',
+  playerFace:'#b08060', playerLeg:'#1a0f08', playerHood:'#1a0f08',
+  lanternMetal:'#5a3a20', lanternGlow:'#ffcc66', lanternHot:'#ffaa33',
+  shadowBody:'#06030c', shadowEdge:'#140a1e',
+  shadowEye:'#cc2222', shadowEyeGlow:'#ff4444',
+  fastShadow:'#0a0614', heavyShadow:'#040208',
+  oil:'#ff9944', oilGlow:'#ffcc88', mem:'#a8c8ff',
+  pulse:'#e0f4ff', white:'#ffffff',
+  danger:'#cc3344', hpFull:'#ffbb44', hpEmpty:'#2a1a10',
+  uiText:'#d8c890', uiDim:'#5a5040', uiAccent:'#ffcc66',
+  transition:'#ffe7c0',
+};
+
+/* ---------- 2. 音频引擎 ---------- */
+let AC=null, masterGain=null, ambientNodes=null, muted=false;
+
+function initAudio(){
+  if (AC) return;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  AC = new Ctx();
+  masterGain = AC.createGain();
+  masterGain.gain.value = 0.28;
+  masterGain.connect(AC.destination);
+  startAmbient();
+  AC.resume && AC.resume();
+}
+
+function startAmbient(){
+  if (!AC || ambientNodes) return;
+  const o1 = AC.createOscillator(), o2 = AC.createOscillator();
+  const g = AC.createGain(), filter = AC.createBiquadFilter();
+  o1.type='sine'; o1.frequency.value=48;
+  o2.type='sine'; o2.frequency.value=55;
+  filter.type='lowpass'; filter.frequency.value=300;
+  g.gain.value = 0.05;
+  o1.connect(filter); o2.connect(filter);
+  filter.connect(g); g.connect(masterGain);
+  o1.start(); o2.start();
+  ambientNodes = {o1,o2,g};
+}
+
+function sfx(freq, dur=0.12, type='sine', vol=0.3, slideTo){
+  if (!AC || muted) return;
+  const t = AC.currentTime;
+  const osc = AC.createOscillator(), g = AC.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t);
+  if (slideTo!==undefined) osc.frequency.exponentialRampToValueAtTime(Math.max(20,slideTo), t+dur);
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(vol, t+0.008);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+  osc.connect(g); g.connect(masterGain);
+  osc.start(t); osc.stop(t+dur+0.05);
+}
+
+function noiseBurst(dur=0.2, vol=0.15, cutoff=800, type='lowpass'){
+  if (!AC || muted) return;
+  const t = AC.currentTime;
+  const n = Math.floor(AC.sampleRate*dur);
+  const buf = AC.createBuffer(1, n, AC.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i=0;i<n;i++) d[i] = Math.random()*2-1;
+  const src = AC.createBufferSource();
+  src.buffer = buf;
+  const f = AC.createBiquadFilter();
+  f.type = type; f.frequency.value = cutoff;
+  const g = AC.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+  src.connect(f); f.connect(g); g.connect(masterGain);
+  src.start(t);
+}
+
+const soundPulse = ()=>{ sfx(880,0.25,'sine',0.18,220); sfx(1320,0.18,'triangle',0.08,660); };
+const soundFlare = ()=>{ sfx(150,0.35,'sawtooth',0.12,300); noiseBurst(0.25,0.06,1500,'highpass'); };
+const soundPickup= ()=>{ sfx(660,0.08,'square',0.14); setTimeout(()=>sfx(990,0.12,'square',0.12),40); };
+const soundHurt  = ()=>{ sfx(180,0.25,'sawtooth',0.25,60); noiseBurst(0.18,0.15,400); };
+const soundKill  = ()=>{ sfx(220,0.18,'triangle',0.15,110); noiseBurst(0.12,0.06,2000,'highpass'); };
+const soundNight = ()=>[523,659,784].forEach((f,i)=>setTimeout(()=>sfx(f,0.5,'sine',0.15),i*120));
+const soundDawn  = ()=>[523,659,784,1047,1319].forEach((f,i)=>setTimeout(()=>sfx(f,0.8,'sine',0.14),i*180));
+const soundDeath = ()=>[440,330,262,196].forEach((f,i)=>setTimeout(()=>sfx(f,0.4,'sawtooth',0.2),i*150));
+
+/* ---------- 3. 输入 ---------- */
+const keys = new Set();
+const justPressed = new Set();
+
+function mapKey(k){
+  k = (k||'').toLowerCase();
+  if (k==='arrowleft' || k==='a') return 'left';
+  if (k==='arrowright'|| k==='d') return 'right';
+  if (k==='arrowup'   || k==='w') return 'up';
+  if (k==='arrowdown' || k==='s') return 'down';
+  if (k==='j' || k===' ')  return 'pulse';
+  if (k==='k') return 'flare';
+  if (k==='enter' || k==='return') return 'confirm';
+  if (k==='r') return 'restart';
+  if (k==='escape' || k==='p') return 'pause';
+  if (k==='m') return 'mute';
+  return null;
+}
+
+window.addEventListener('keydown', e=>{
+  const a = mapKey(e.key);
+  if (a) e.preventDefault();
+  initAudio();
+  if (a && !keys.has(a)) justPressed.add(a);
+  if (a) keys.add(a);
+  if (e.key === ' ' && G.state === 'playing') {
+    justPressed.add('pulse'); keys.add('pulse');
+  }
+});
+
+window.addEventListener('keyup', e=>{
+  const a = mapKey(e.key);
+  if (a) keys.delete(a);
+  if (e.key === ' ') keys.delete('pulse');
+});
+
+/* 触摸 */
+const touchEl = document.getElementById('touch');
+if ('ontouchstart' in window || navigator.maxTouchPoints>0) touchEl.style.display = 'flex';
+touchEl.querySelectorAll('button').forEach(btn=>{
+  const k = btn.dataset.k;
+  const action = k==='pulse' ? 'pulse' : k==='flare' ? 'flare' : k;
+  const down = e=>{ e.preventDefault(); initAudio(); if(!keys.has(action)) justPressed.add(action); keys.add(action); };
+  const up   = e=>{ e.preventDefault(); keys.delete(action); };
+  btn.addEventListener('touchstart', down, {passive:false});
+  btn.addEventListener('touchend', up, {passive:false});
+  btn.addEventListener('touchcancel', up);
+});
+
+/* 点击画布 = 确认（兼容移动端开始/重开） */
+canvas.addEventListener('pointerdown', ()=>{
+  initAudio();
+  if (G.state==='menu' || G.state==='gameover' || G.state==='victory') {
+    justPressed.add('confirm');
+  }
+});
+
+/* ---------- 4. 游戏常量 ---------- */
+const PLAYER_SPEED = 72;
+const PLAYER_RADIUS = 5;
+const PLAYER_MAX_HP = 3;
+const PLAYER_MAX_OIL = 100;
+const PLAYER_MAX_STAMINA = 100;
+const OIL_DRAIN = 1.0;
+const STAMINA_REGEN = 22;
+const PULSE_COST = 25;
+const PULSE_COOLDOWN = 0.9;
+const PULSE_MAX_R = 100;
+const PULSE_SPEED = 240;
+const PULSE_DAMAGE = 2;
+const FLARE_COST = 25;
+const FLARE_DURATION = 3.5;
+const FLARE_RADIUS_MULT = 2.2;
+const LIGHT_DPS = 1.6;
+const NIGHT_DURATION = 50;
+const INVULN_TIME = 1.1;
+const PICKUP_RADIUS = 9;
+const BOSS_AT_PHASE = 0.74;
+
+/* ---------- 5. 全局状态 ---------- */
+const G = {
+  state:'menu',
+  time:0,
+  night:1,
+  maxNight:3,
+  nightTimer:0,
+  nightPhase:0,
+  score:0,
+  bestNight:1,
+  bestScore:0,
+  transitionTimer:0,
+  transitionMax:0,
+  transitionText:'',
+  transitionSub:'',
+  transitionCallback:null,
+  shake:0,
+  flash:0,
+  dawn:0,
+  pausedFrom:null,
+  deathTimer:0,
+  messages:[],
+  menuTime:0,
+  memoryCount:0,
+  totalShadows:0,
+  comboCount:0,
+  comboTimer:0,
+  bossSpawned:false,
+};
+
+/* ---------- 6. 世界数据 ---------- */
+let player;
+let shadows = [];
+let oilDrops = [];
+let memories = [];
+let pulses = [];
+let particles = [];
+let floatTexts = [];
+let trees = [];
+let bushes = [];
+let rocks = [];
+let stars = [];
+let houses = [];
+let mountainsFar = [];
+let mountainsNear = [];
+let spawnAccum = 0;
+let nextSpawnInterval = 2.2;
+let gameTime = 0;
+
+const MEMORY_LINES = [
+  '他们说, 灯油用完之前, 黎明会来的。',
+  '那年冬天, 村里的钟停了。没有人去修。',
+  '师傅说: 光不是用来看的, 是用来听的。',
+  '第一夜, 我听见孩子在哭。第二夜, 就没有声音了。',
+  '灯芯每烧短一寸, 我就想起一个名字。',
+  '我记不清自己为什么还在这里。',
+  '也许我只是想看看, 天还能不能亮。',
+  '光语, 是灯和人说话的方式。',
+  '如果你听到回声, 那不是幻觉。',
+  '天亮之前, 不要回头看。',
+];
+
+/* ---------- 7. 世界生成 ---------- */
+function generateStars(){
+  stars = [];
+  for (let i=0;i<80;i++){
+    stars.push({
+      x: rand(0,GW), y: rand(0, GH*0.55),
+      s: Math.random()<0.15?2:1,
+      base: rand(0.2,0.9),
+      phase: rand(0,TAU),
+      speed: rand(0.5,2.0),
+    });
+  }
+}
+
+function generateMountains(){
+  mountainsFar = []; mountainsNear = [];
+  let x = -20;
+  while (x < GW+40){ mountainsFar.push({x, h: rand(25,55), w: rand(60,110)}); x += rand(50,90); }
+  x = -20;
+  while (x < GW+40){ mountainsNear.push({x, h: rand(15,35), w: rand(50,90)}); x += rand(45,80); }
+}
+
+function generateWorld(){
+  trees = []; bushes = []; rocks = []; houses = [];
+  const edgeSpots = [
+    [8,GH-30],[GW-20,GH-30],[8,GH-80],[GW-25,GH-90],
+    [60,GH-12],[GW-70,GH-14],[130,GH-10],[GW-160,GH-12],
+  ];
+  for (const [x,y] of edgeSpots) trees.push({x: x+rand(-6,6), y, h: rand(26,40), seed: rand(0,100)});
+  houses.push({x: GW*0.42, y: GH*0.52, w: 42, h: 26, seed: 1});
+  houses.push({x: GW*0.58, y: GH*0.48, w: 34, h: 22, seed: 2});
+  houses.push({x: GW*0.24, y: GH*0.60, w: 26, h: 18, seed: 3});
+  for (let i=0;i<10;i++) rocks.push({x: rand(20,GW-20), y: rand(GH*0.55, GH-8), w: randInt(4,8), h: randInt(2,4)});
+  for (let i=0;i<22;i++) bushes.push({x: rand(10,GW-10), y: rand(GH*0.5, GH-6), w: randInt(3,7), h: randInt(2,4), shade: Math.random()<0.5?0:1});
+}
+
+/* ---------- 8. 玩家 ---------- */
+function createPlayer(){
+  player = {
+    x: GW/2, y: GH*0.72, vx:0, vy:0,
+    facing:'up', walkFrame:0, walkTimer:0, moving:false,
+    hp: PLAYER_MAX_HP, oil: PLAYER_MAX_OIL, stamina: PLAYER_MAX_STAMINA,
+    lanternRadius:52, lanternBase:52, targetRadius:52,
+    flareTimer:0, invulnTimer:0, pulseCd:0,
+    bob:0, bobTime:0,
+  };
+}
+
+/* ---------- 9. 实体 ---------- */
+function spawnShadow(type){
+  const angle = rand(0, TAU);
+  const r = rand(140, 230);
+  let x = clamp(player.x + Math.cos(angle)*r, 8, GW-8);
+  let y = clamp(player.y + Math.sin(angle)*r*0.75, GH*0.3, GH-6);
+
+  const defs = {
+    shadow: {hp:3, speed:32, size:8,  dmg:1, xp:1},
+    fast:   {hp:2, speed:66, size:6,  dmg:1, xp:2},
+    heavy:  {hp:9, speed:20, size:14, dmg:2, xp:4},
+    boss:   {hp:22,speed:16, size:22, dmg:2, xp:10},
+  };
+  const d = defs[type] || defs.shadow;
+
+  shadows.push({
+    x, y, type,
+    hp:d.hp, maxHp:d.hp, speed:d.speed, size:d.size, dmg:d.dmg, xp:d.xp,
+    stunTimer:0, animTime:rand(0,10), wobblePhase:rand(0,TAU),
+    hitFlash:0, dying:false, deathTimer:0,
+  });
+}
+
+function spawnBoss(){
+  // 主影从屏幕外飘进来
+  const fromLeft = Math.random()<0.5;
+  shadows.push({
+    x: fromLeft? -30 : GW+30,
+    y: GH*0.5,
+    type:'boss',
+    hp:22, maxHp:22, speed:16, size:22, dmg:2, xp:10,
+    stunTimer:0, animTime:rand(0,10), wobblePhase:rand(0,TAU),
+    hitFlash:0, dying:false, deathTimer:0,
+    boss:true,
+  });
+}
+
+function spawnOil(x, y, amt){
+  oilDrops.push({x, y, bobPhase:rand(0,TAU), life:20, picked:false, amt: amt||22});
+}
+
+function spawnMemory(x, y){
+  memories.push({x, y, bobPhase:rand(0,TAU), life:30, picked:false, text: choose(MEMORY_LINES)});
+}
+
+function spawnParticle(x, y, vx, vy, life, color, size, gravity){
+  particles.push({x,y,vx,vy,life,maxLife:life,color,size,gravity:gravity||0});
+}
+
+function spawnFloatText(x, y, text, color, life){
+  floatTexts.push({x,y,text,color:color||C.uiAccent,life:life||1.0,maxLife:life||1.0,vy:-20});
+}
+
+function pushMessage(text, dur){
+  G.messages.push({text, time:0, dur: dur||2.5});
+}
+
+/* ---------- 10. 夜晚开始 ---------- */
+function startNight(n){
+  G.night = n;
+  G.nightTimer = 0;
+  G.nightPhase = 0;
+  G.state = 'playing';
+  G.dawn = 0;
+  G.messages = [];
+  G.comboCount = 0;
+  G.comboTimer = 0;
+  G.bossSpawned = false;
+
+  shadows.length = 0;
+  oilDrops.length = 0;
+  memories.length = 0;
+  pulses.length = 0;
+  particles.length = 0;
+  floatTexts.length = 0;
+  spawnAccum = 0;
+  nextSpawnInterval = Math.max(0.55, 2.0 - n*0.35);
+
+  keys.clear();
+  justPressed.clear();
+
+  createPlayer();
+  player.lanternRadius = player.lanternBase = 48 + n*3;
+  player.targetRadius = player.lanternRadius;
+
+  for (let i=0;i<4+n;i++) spawnOil(rand(40,GW-40), rand(GH*0.45, GH-20));
+  for (let i=0;i<1+n;i++) spawnMemory(rand(40,GW-40), rand(GH*0.4, GH-20));
+
+  if (n >= 2) for (let i=0;i<n-1;i++) spawnShadow('shadow');
+
+  soundNight();
+  const names = ['', '第一夜 · 起雾', '第二夜 · 回响', '第三夜 · 灰烬'];
+  pushMessage(names[n] || ('第'+n+'夜'), 2.5);
+}
+
+/* ---------- 11. 更新 ---------- */
+function updatePlayer(dt){
+  if (player.hp <= 0) return;
+
+  let dx=0, dy=0;
+  if (keys.has('left'))  dx -= 1;
+  if (keys.has('right')) dx += 1;
+  if (keys.has('up'))    dy -= 1;
+  if (keys.has('down'))  dy += 1;
+
+  player.moving = (dx!==0 || dy!==0);
+  if (player.moving){
+    const len = Math.hypot(dx,dy);
+    dx/=len; dy/=len;
+    player.x += dx*PLAYER_SPEED*dt;
+    player.y += dy*PLAYER_SPEED*dt;
+    if (Math.abs(dx) > Math.abs(dy)) player.facing = dx>0?'right':'left';
+    else player.facing = dy>0?'down':'up';
+    player.walkTimer += dt;
+    if (player.walkTimer > 0.14){ player.walkTimer = 0; player.walkFrame = (player.walkFrame+1)%4; }
+    player.bobTime += dt*8;
+  } else player.walkFrame = 0;
+  player.bob = Math.sin(player.bobTime);
+
+  player.x = clamp(player.x, 6, GW-6);
+  player.y = clamp(player.y, GH*0.30, GH-6);
+
+  player.oil = Math.max(0, player.oil - OIL_DRAIN*dt);
+  player.stamina = Math.min(PLAYER_MAX_STAMINA, player.stamina + STAMINA_REGEN*dt);
+
+  if (player.flareTimer > 0){
+    player.flareTimer -= dt;
+    if (player.flareTimer <= 0) player.targetRadius = player.lanternBase;
+  }
+  if (player.pulseCd > 0) player.pulseCd -= dt;
+
+  if ((justPressed.has('pulse') || keys.has('pulse')) && player.pulseCd <= 0 && player.stamina >= PULSE_COST){
+    doPulse();
+  }
+  if (justPressed.has('flare') && player.flareTimer <= 0 && player.oil >= FLARE_COST){
+    doFlare();
+  }
+
+  player.lanternRadius = lerp(player.lanternRadius, player.targetRadius, dt*6);
+  if (player.invulnTimer > 0) player.invulnTimer -= dt;
+
+  for (const o of oilDrops){
+    if (o.picked) continue;
+    if (dist2(player.x, player.y, o.x, o.y) < PICKUP_RADIUS*PICKUP_RADIUS){
+      o.picked = true;
+      player.oil = Math.min(PLAYER_MAX_OIL, player.oil + o.amt);
+      spawnFloatText(o.x, o.y-4, '+'+o.amt+' 油', C.oilGlow, 0.9);
+      for (let i=0;i<8;i++) spawnParticle(o.x, o.y, rand(-40,40), rand(-50,10), 0.5, C.oil, 1, 60);
+      soundPickup();
+    }
+  }
+  for (const m of memories){
+    if (m.picked) continue;
+    if (dist2(player.x, player.y, m.x, m.y) < PICKUP_RADIUS*PICKUP_RADIUS){
+      m.picked = true;
+      G.memoryCount++;
+      G.score += 25;
+      pushMessage(m.text, 3.5);
+      spawnFloatText(m.x, m.y-4, '+25', C.mem, 1.0);
+      for (let i=0;i<12;i++){
+        const a = i/12*TAU;
+        spawnParticle(m.x, m.y, Math.cos(a)*30, Math.sin(a)*30, 0.7, C.mem, 1, -20);
+      }
+      sfx(1200, 0.3, 'sine', 0.15, 1600);
+    }
+  }
+}
+
+function doPulse(){
+  player.pulseCd = PULSE_COOLDOWN;
+  player.stamina -= PULSE_COST;
+  pulses.push({x: player.x, y: player.y-8, r:0, maxR:PULSE_MAX_R, speed:PULSE_SPEED, hit:new Set()});
+  soundPulse();
+  G.flash = Math.min(0.35, G.flash + 0.15);
+}
+
+function doFlare(){
+  player.oil -= FLARE_COST;
+  player.flareTimer = FLARE_DURATION;
+  player.targetRadius = player.lanternBase * FLARE_RADIUS_MULT;
+  soundFlare();
+  for (let i=0;i<16;i++){
+    const a = i/16*TAU;
+    spawnParticle(player.x + Math.cos(a)*4, player.y-8 + Math.sin(a)*4,
+      Math.cos(a)*60, Math.sin(a)*60, 0.6, C.lanternGlow, 1, 0);
+  }
+  spawnFloatText(player.x, player.y-24, '燃油', C.lanternGlow, 0.8);
+}
+
+function updatePulses(dt){
+  for (let i=pulses.length-1;i>=0;i--){
+    const p = pulses[i];
+    p.r += p.speed*dt;
+    if (p.r >= p.maxR){ pulses.splice(i,1); continue; }
+    for (const s of shadows){
+      if (s.dying || p.hit.has(s)) continue;
+      const d = dist(p.x, p.y, s.x, s.y);
+      if (Math.abs(d - p.r) < 14){ p.hit.add(s); damageShadow(s, PULSE_DAMAGE, p.x, p.y); }
+    }
+  }
+}
+
+function damageShadow(s, dmg, fromX, fromY){
+  s.hp -= dmg;
+  s.hitFlash = 0.15;
+  s.stunTimer = Math.max(s.stunTimer, 0.35);
+  if (s.hp <= 0 && !s.dying) killShadow(s);
+  else {
+    if (fromX !== undefined){
+      const dx = s.x - fromX, dy = s.y - fromY;
+      const d = Math.hypot(dx,dy) || 1;
+      s.x += dx/d * 8; s.y += dy/d * 8;
+    }
+    sfx(440, 0.06, 'square', 0.1, 220);
+  }
+}
+
+function killShadow(s){
+  s.dying = true;
+  s.deathTimer = 0.4;
+  G.score += s.xp*5;
+  G.totalShadows++;
+
+  // 连击
+  G.comboCount++;
+  G.comboTimer = 2.5;
+  if (G.comboCount >= 3){
+    const bonus = G.comboCount * 3;
+    G.score += bonus;
+    spawnFloatText(s.x, s.y-10, '连击 x'+G.comboCount, C.uiAccent, 0.9);
+  }
+
+  soundKill();
+  for (let i=0;i<10;i++) spawnParticle(s.x, s.y, rand(-50,50), rand(-60,20), rand(0.4,0.8), C.shadowEdge, rand(1,2), 60);
+  if (Math.random() < 0.22) spawnOil(s.x, s.y);
+}
+
+function updateShadows(dt){
+  for (let i=shadows.length-1;i>=0;i--){
+    const s = shadows[i];
+    s.animTime += dt;
+    if (s.hitFlash>0) s.hitFlash -= dt;
+
+    if (s.dying){
+      s.deathTimer -= dt;
+      if (s.deathTimer <= 0) shadows.splice(i,1);
+      continue;
+    }
+    if (s.stunTimer > 0) s.stunTimer -= dt;
+    else {
+      const dx = player.x - s.x, dy = player.y - s.y;
+      const d = Math.hypot(dx,dy) || 1;
+      s.x += (dx/d)*s.speed*dt;
+      s.y += (dy/d)*s.speed*dt;
+    }
+
+    const dToPlayer = dist(player.x, player.y-8, s.x, s.y);
+    if (dToPlayer < player.lanternRadius - s.size*0.5){
+      s.hp -= LIGHT_DPS * dt;
+      if (Math.random() < 0.1) spawnParticle(s.x+rand(-3,3), s.y+rand(-3,3), rand(-10,10), rand(-20,-5), 0.4, C.shadowEdge, 1, 0);
+      if (s.hp <= 0){ killShadow(s); continue; }
+    }
+
+    if (dToPlayer < s.size + PLAYER_RADIUS && player.invulnTimer <= 0 && player.hp > 0){
+      hurtPlayer(s.dmg, s.x, s.y);
+    }
+
+    s.x = clamp(s.x, 4, GW-4);
+    s.y = clamp(s.y, GH*0.25, GH-4);
+  }
+}
+
+function hurtPlayer(dmg, fromX, fromY){
+  if (player.invulnTimer > 0) return;
+  player.hp -= dmg;
+  player.invulnTimer = INVULN_TIME;
+  G.shake = Math.min(6, G.shake + 4);
+  G.flash = Math.min(0.6, G.flash + 0.4);
+  soundHurt();
+  for (let i=0;i<14;i++) spawnParticle(player.x, player.y-8, rand(-80,80), rand(-100,0), rand(0.4,0.8), C.danger, rand(1,2), 100);
+  if (fromX!==undefined){
+    const dx = player.x - fromX, dy = player.y - fromY;
+    const d = Math.hypot(dx,dy) || 1;
+    player.x = clamp(player.x + dx/d*12, 6, GW-6);
+    player.y = clamp(player.y + dy/d*12, GH*0.3, GH-6);
+  }
+  if (player.hp <= 0){
+    player.hp = 0;
+    G.deathTimer = 1.5;
+    G.state = 'dying';
+    soundDeath();
+  }
+}
+
+function updateParticles(dt){
+  for (let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0){ particles.splice(i,1); continue; }
+    p.vy += p.gravity * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+  }
+  for (let i=floatTexts.length-1;i>=0;i--){
+    const f = floatTexts[i];
+    f.life -= dt; f.y += f.vy * dt;
+    if (f.life <= 0) floatTexts.splice(i,1);
+  }
+}
+
+function updateOilAndMemory(dt){
+  for (let i=oilDrops.length-1;i>=0;i--){
+    const o = oilDrops[i];
+    o.life -= dt; o.bobPhase += dt*3;
+    if (o.picked || o.life <= 0) oilDrops.splice(i,1);
+  }
+  for (let i=memories.length-1;i>=0;i--){
+    const m = memories[i];
+    m.life -= dt; m.bobPhase += dt*2;
+    if (m.picked || m.life <= 0) memories.splice(i,1);
+  }
+}
+
+function updateSpawning(dt){
+  if (G.nightPhase > 0.95) return;
+  spawnAccum += dt;
+  const progress = G.nightPhase;
+  const interval = lerp(nextSpawnInterval, Math.max(0.4, nextSpawnInterval*0.45), progress);
+  if (spawnAccum >= interval && shadows.length < 14){
+    spawnAccum = 0;
+    let type = 'shadow';
+    const r = Math.random();
+    if (G.night >= 2 && r < 0.28) type = 'fast';
+    if (G.night >= 3 && r > 0.88) type = 'heavy';
+    spawnShadow(type);
+  }
+  if (Math.random() < dt*0.25 && oilDrops.length < 5) spawnOil(rand(40,GW-40), rand(GH*0.45, GH-20));
+  if (Math.random() < dt*0.06 && memories.length < 2 && G.memoryCount < 8) spawnMemory(rand(40,GW-40), rand(GH*0.4, GH-20));
+
+  // 主影
+  if (!G.bossSpawned && G.nightPhase > BOSS_AT_PHASE){
+    G.bossSpawned = true;
+    spawnBoss();
+    pushMessage('主影 出现了', 2.5);
+  }
+}
+
+function updateMessages(dt){
+  for (let i=G.messages.length-1;i>=0;i--){
+    const m = G.messages[i];
+    m.time += dt;
+    if (m.time > m.dur) G.messages.splice(i,1);
+  }
+}
+
+function updateCombo(dt){
+  if (G.comboTimer > 0){
+    G.comboTimer -= dt;
+    if (G.comboTimer <= 0) G.comboCount = 0;
+  }
+}
+
+function updateGame(dt){
+  if (G.state !== 'playing' && G.state !== 'dying') return;
+  gameTime += dt;
+
+  if (G.state === 'dying'){
+    updateParticles(dt);
+    G.deathTimer -= dt;
+    if (G.deathTimer <= 0){
+      G.state = 'gameover';
+      G.bestNight = Math.max(G.bestNight, G.night);
+      G.bestScore = Math.max(G.bestScore, G.score);
+    }
+    return;
+  }
+
+  G.nightTimer += dt;
+  G.nightPhase = Math.min(1, G.nightTimer/NIGHT_DURATION);
+
+  updatePlayer(dt);
+  updatePulses(dt);
+  updateShadows(dt);
+  updateOilAndMemory(dt);
+  updateParticles(dt);
+  updateSpawning(dt);
+  updateMessages(dt);
+  updateCombo(dt);
+
+  if (G.nightPhase >= 1){
+    G.dawn += dt * 0.4;
+    if (G.dawn >= 1) onNightComplete();
+  }
+
+  if (G.shake > 0) G.shake = Math.max(0, G.shake - dt*15);
+  if (G.flash > 0) G.flash = Math.max(0, G.flash - dt*2.5);
+}
+
+function onNightComplete(){
+  soundDawn();
+  G.score += 50 + Math.floor(G.nightTimer*2) + G.night*30;
+  G.bestNight = Math.max(G.bestNight, G.night);
+  G.bestScore = Math.max(G.bestScore, G.score);
+
+  if (G.night >= G.maxNight){
+    startTransition('黎明', '你熬过了最后一夜。也许不是最后一夜, 但今晚, 天亮了。', 2.4, ()=>{ G.state='victory'; });
+  } else {
+    startTransition('天亮了', '第 ' + G.night + ' 夜结束了。', 2.0, ()=>{ startNight(G.night+1); });
+  }
+}
+
+function startTransition(title, sub, dur, cb){
+  G.state = 'transition';
+  G.transitionTimer = 0;
+  G.transitionMax = dur;
+  G.transitionText = title;
+  G.transitionSub = sub;
+  G.transitionCallback = cb;
+}
+
+function updateTransition(dt){
+  G.transitionTimer += dt;
+  if (G.transitionTimer >= G.transitionMax){
+    const cb = G.transitionCallback;
+    G.transitionCallback = null;
+    if (cb) cb();
+  }
+}
+
+/* ---------- 12. 状态输入 ---------- */
+function handleMenuInput(){
+  if (justPressed.has('confirm') || justPressed.has('pulse')){
+    initAudio();
+    G.score = 0;
+    G.memoryCount = 0;
+    startNight(1);
+  }
+}
+function handlePauseInput(){
+  if (justPressed.has('pause') || justPressed.has('confirm')){
+    G.state = G.pausedFrom || 'playing';
+    G.pausedFrom = null;
+  }
+  if (justPressed.has('restart')){
+    G.score = 0; G.memoryCount = 0;
+    startNight(1);
+  }
+}
+function handleGameOverInput(){
+  if (justPressed.has('confirm') || justPressed.has('restart')){
+    G.state = 'menu'; G.menuTime = 0;
+  }
+}
+function handleVictoryInput(){
+  if (justPressed.has('confirm') || justPressed.has('restart')){
+    G.state = 'menu'; G.menuTime = 0;
+  }
+}
+
+/* ---------- 13. 主更新 ---------- */
+function update(dt){
+  G.time += dt;
+
+  if (G.state === 'menu'){ G.menuTime += dt; updateParticles(dt); handleMenuInput(); }
+  else if (G.state === 'playing' || G.state === 'dying'){
+    if (justPressed.has('pause') && G.state === 'playing'){
+      G.pausedFrom = G.state; G.state = 'paused';
+    } else updateGame(dt);
+  }
+  else if (G.state === 'paused'){ handlePauseInput(); updateParticles(dt); }
+  else if (G.state === 'transition'){ updateTransition(dt); updateParticles(dt); }
+  else if (G.state === 'gameover'){ updateParticles(dt); handleGameOverInput(); }
+  else if (G.state === 'victory'){ updateParticles(dt); handleVictoryInput(); }
+
+  if (justPressed.has('mute')){
+    muted = !muted;
+    if (masterGain) masterGain.gain.value = muted ? 0 : 0.28;
+  }
+  justPressed.clear();
+}
+
+/* ---------- 14. 渲染 ---------- */
+function drawSky(){
+  const g = ctx.createLinearGradient(0,0,0,GH);
+  g.addColorStop(0, C.skyTop);
+  g.addColorStop(0.5, C.skyMid);
+  g.addColorStop(1, C.skyLow);
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,GW,GH);
+
+  for (const s of stars){
+    const tw = 0.5 + 0.5*Math.sin(G.time*s.speed + s.phase);
+    ctx.globalAlpha = s.base * (0.4 + 0.6*tw);
+    ctx.fillStyle = C.moon;
+    ctx.fillRect(Math.floor(s.x), Math.floor(s.y), s.s, s.s);
+  }
+  ctx.globalAlpha = 1;
+
+  const mx = GW*0.78, my = GH*0.16;
+  ctx.fillStyle = C.moonHalo;
+  ctx.beginPath(); ctx.arc(mx, my, 34, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(mx, my, 24, 0, TAU); ctx.fill();
+  ctx.fillStyle = C.moon;
+  ctx.beginPath(); ctx.arc(mx, my, 16, 0, TAU); ctx.fill();
+  ctx.fillStyle = 'rgba(180,170,140,0.5)';
+  ctx.fillRect(mx-6, my-4, 3, 2);
+  ctx.fillRect(mx+2, my+3, 4, 3);
+  ctx.fillRect(mx-2, my+6, 2, 2);
+}
+
+function drawMountains(){
+  ctx.fillStyle = C.hillFar;
+  for (const m of mountainsFar){
+    ctx.beginPath();
+    ctx.moveTo(m.x, GH*0.5);
+    ctx.lineTo(m.x + m.w*0.5, GH*0.5 - m.h);
+    ctx.lineTo(m.x + m.w, GH*0.5);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.fillStyle = C.hillNear;
+  for (const m of mountainsNear){
+    ctx.beginPath();
+    ctx.moveTo(m.x, GH*0.56);
+    ctx.lineTo(m.x + m.w*0.5, GH*0.56 - m.h);
+    ctx.lineTo(m.x + m.w, GH*0.56);
+    ctx.closePath(); ctx.fill();
+  }
+}
+
+function drawHouses(){
+  for (const h of houses){
+    const x = Math.floor(h.x), y = Math.floor(h.y), w = h.w, hh = h.h;
+    ctx.fillStyle = C.house;
+    ctx.fillRect(x, y, w, hh);
+    ctx.fillStyle = C.houseRoof;
+    ctx.beginPath();
+    ctx.moveTo(x-3, y); ctx.lineTo(x + w*0.5, y - hh*0.55); ctx.lineTo(x + w + 3, y);
+    ctx.closePath(); ctx.fill();
+    const wins = [[x+6, y+8],[x+w-14, y+8],[x+6, y+hh-14]];
+    for (let i=0;i<wins.length;i++){
+      const [wx, wy] = wins[i];
+      const lit = (h.seed*7 + i) % 3 !== 0;
+      if (lit){
+        ctx.fillStyle = 'rgba(255,150,50,0.18)';
+        ctx.fillRect(wx-3, wy-3, 12, 14);
+        ctx.fillStyle = C.windowGlow;
+        ctx.fillRect(wx, wy, 5, 6);
+      } else {
+        ctx.fillStyle = C.windowDim;
+        ctx.fillRect(wx, wy, 5, 6);
+      }
+    }
+  }
+}
+
+function drawGround(){
+  ctx.fillStyle = C.ground;
+  ctx.fillRect(0, GH*0.55, GW, GH*0.45);
+  ctx.fillStyle = C.ground2;
+  ctx.fillRect(0, GH*0.72, GW, GH*0.28);
+
+  for (const b of bushes){
+    const x = Math.floor(b.x), y = Math.floor(b.y);
+    ctx.fillStyle = b.shade===0 ? C.bush : C.grass;
+    ctx.fillRect(x, y, b.w, b.h);
+    ctx.fillRect(x+1, y-1, b.w-2, 1);
+  }
+  for (const r of rocks){
+    const x = Math.floor(r.x), y = Math.floor(r.y);
+    ctx.fillStyle = C.rock;
+    ctx.fillRect(x, y, r.w, r.h);
+    ctx.fillStyle = 'rgba(60,50,70,0.5)';
+    ctx.fillRect(x, y, r.w, 1);
+  }
+  for (const t of trees) drawTree(t);
+}
+
+function drawTree(t){
+  const x = Math.floor(t.x), y = Math.floor(t.y);
+  const h = t.h;
+  ctx.fillStyle = C.treeTrunk;
+  ctx.fillRect(x-1, y-h*0.35, 2, h*0.35);
+  for (let i=0;i<3;i++){
+    const layerY = y - h*0.35 - i*h*0.22;
+    const layerW = (h*0.55) * (1 - i*0.2);
+    ctx.fillStyle = i===0 ? C.treeLeaf : (i===1 ? C.treeLeafHi : C.treeLeaf);
+    ctx.beginPath();
+    ctx.moveTo(x-layerW, layerY + h*0.22);
+    ctx.lineTo(x, layerY - 3);
+    ctx.lineTo(x+layerW, layerY + h*0.22);
+    ctx.closePath(); ctx.fill();
+  }
+}
+
+function drawOil(){
+  for (const o of oilDrops){
+    const bob = Math.sin(o.bobPhase)*1.2;
+    const x = Math.floor(o.x), y = Math.floor(o.y + bob);
+    const g = ctx.createRadialGradient(x, y, 0, x, y, 10);
+    g.addColorStop(0, 'rgba(255,170,80,0.5)');
+    g.addColorStop(1, 'rgba(255,170,80,0)');
+    ctx.fillStyle = g; ctx.fillRect(x-10, y-10, 20, 20);
+    ctx.fillStyle = C.oil;
+    ctx.fillRect(x-2, y-2, 4, 4);
+    ctx.fillStyle = C.oilGlow;
+    ctx.fillRect(x-1, y-2, 2, 2);
+  }
+}
+
+function drawMemories(){
+  for (const m of memories){
+    const bob = Math.sin(m.bobPhase)*2;
+    const x = Math.floor(m.x), y = Math.floor(m.y + bob);
+    const g = ctx.createRadialGradient(x, y, 0, x, y, 14);
+    g.addColorStop(0, 'rgba(140,180,255,0.55)');
+    g.addColorStop(1, 'rgba(140,180,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(x-14, y-14, 28, 28);
+    ctx.fillStyle = C.mem;
+    ctx.beginPath();
+    ctx.moveTo(x, y-4); ctx.lineTo(x+3, y); ctx.lineTo(x, y+4); ctx.lineTo(x-3, y);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(x-1, y-1, 2, 2);
+  }
+}
+
+function drawPulses(){
+  for (const p of pulses){
+    const alpha = 1 - p.r/p.maxR;
+    ctx.strokeStyle = 'rgba(220,240,255,'+alpha*0.9+')';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,220,150,'+alpha*0.6+')';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r*0.85, 0, TAU); ctx.stroke();
+  }
+}
+
+function drawShadow(s){
+  const t = s.animTime;
+  const wobble = Math.sin(t*3 + s.wobblePhase)*0.6;
+  const x = Math.floor(s.x + wobble);
+  const y = Math.floor(s.y);
+  const size = s.size;
+
+  if (s.dying){
+    const k = 1 - s.deathTimer/0.4;
+    ctx.globalAlpha = 1 - k;
+    ctx.fillStyle = C.shadowBody;
+    ctx.beginPath(); ctx.arc(x, y, size*(1+k*0.5), 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  const dToPlayer = dist(player.x, player.y-8, s.x, s.y);
+  const lit = clamp(1 - (dToPlayer - player.lanternRadius*0.4)/(player.lanternRadius*0.8), 0, 1);
+  const bodyColor = s.type==='fast' ? C.fastShadow : s.type==='heavy' ? C.heavyShadow : (s.type==='boss' ? '#020106' : C.shadowBody);
+  const baseAlpha = 0.4 + lit*0.6;
+
+  ctx.globalAlpha = baseAlpha;
+  ctx.fillStyle = bodyColor;
+
+  if (s.type === 'heavy'){
+    ctx.beginPath(); ctx.arc(x, y, size, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(x-4, y+2, size*0.7, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+4, y+1, size*0.75, 0, TAU); ctx.fill();
+  } else if (s.type === 'fast'){
+    ctx.beginPath(); ctx.ellipse(x, y, size*0.7, size*1.2, 0, 0, TAU); ctx.fill();
+  } else if (s.type === 'boss'){
+    ctx.beginPath(); ctx.arc(x, y, size, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(x-6, y+3, size*0.7, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+6, y+3, size*0.7, 0, TAU); ctx.fill();
+    // 主影的触须
+    ctx.globalAlpha = baseAlpha*0.6;
+    for (let i=0;i<5;i++){
+      const a = t*1.5 + i*TAU/5;
+      const tx = x + Math.cos(a)*size*1.6;
+      const ty = y + Math.sin(a)*size*1.1 + size*0.4;
+      ctx.fillRect(Math.floor(tx)-1, Math.floor(ty)-1, 3, 3);
+    }
+  } else {
+    ctx.beginPath(); ctx.arc(x, y, size, 0, TAU); ctx.fill();
+  }
+
+  if (s.hitFlash > 0){
+    ctx.globalAlpha = s.hitFlash*3;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(x, y, size, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // 眼睛
+  const eyeY = y - size*0.15;
+  const blink = (Math.sin(t*2 + s.wobblePhase) > 0.95) ? 0 : 1;
+  if (blink){
+    ctx.globalAlpha = 0.5 + lit*0.5;
+    ctx.fillStyle = C.shadowEyeGlow;
+    const off = size*0.35;
+    ctx.fillRect(x - off - 1, eyeY, 2, 2);
+    ctx.fillRect(x + off - 1, eyeY, 2, 2);
+    ctx.fillStyle = C.shadowEye;
+    ctx.fillRect(x - off, eyeY, 1, 1);
+    ctx.fillRect(x + off, eyeY, 1, 1);
+    ctx.globalAlpha = 1;
+  }
+
+  // 主影血条
+  if (s.type === 'boss' && s.hp > 0){
+    const w = 60, hh = 3;
+    const bx = GW/2 - w/2, by = 54;
+    ctx.fillStyle = 'rgba(20,10,25,0.85)';
+    ctx.fillRect(bx-1, by-1, w+2, hh+2);
+    ctx.fillStyle = '#5a1030';
+    ctx.fillRect(bx, by, w, hh);
+    ctx.fillStyle = '#cc3344';
+    ctx.fillRect(bx, by, w * (s.hp/s.maxHp), hh);
+  }
+}
+
+function drawPlayer(){
+  if (!player) return;
+  const p = player;
+  const x = Math.floor(p.x);
+  const y = Math.floor(p.y);
+  const bob = Math.floor(p.bob);
+
+  if (p.invulnTimer > 0 && Math.floor(p.invulnTimer*20)%2===0) ctx.globalAlpha = 0.4;
+
+  ctx.fillStyle = C.playerLeg;
+  const legPhase = p.moving ? Math.floor(p.walkFrame/2) : 0;
+  ctx.fillRect(x-3, y-4, 2, 4);
+  ctx.fillRect(x+1, y-4, 2, 4);
+  if (p.moving){
+    if (legPhase===0){ ctx.fillRect(x-3, y-4, 2, 4); ctx.fillRect(x+1, y-4, 2, 3); }
+    else { ctx.fillRect(x-3, y-4, 2, 3); ctx.fillRect(x+1, y-4, 2, 4); }
+  }
+
+  ctx.fillStyle = C.playerCloak;
+  ctx.fillRect(x-5, y-16+bob, 10, 12);
+  ctx.fillStyle = C.playerCloakHi;
+  ctx.fillRect(x-4, y-15+bob, 8, 9);
+  ctx.fillStyle = C.playerCloak;
+  ctx.fillRect(x-4, y-5+bob, 8, 1);
+
+  ctx.fillStyle = C.playerHood;
+  ctx.fillRect(x-4, y-24+bob, 8, 5);
+  ctx.fillRect(x-5, y-22+bob, 2, 5);
+  ctx.fillRect(x+3, y-22+bob, 2, 5);
+  ctx.fillStyle = C.playerFace;
+  ctx.fillRect(x-3, y-21+bob, 6, 4);
+
+  ctx.fillStyle = '#1a0f08';
+  if (p.facing === 'left') ctx.fillRect(x-3, y-20+bob, 1, 1);
+  else if (p.facing === 'right') ctx.fillRect(x+2, y-20+bob, 1, 1);
+  else if (p.facing !== 'up'){ ctx.fillRect(x-2, y-20+bob, 1, 1); ctx.fillRect(x+1, y-20+bob, 1, 1); }
+
+  const left = p.facing === 'left';
+  const lx = left ? x-11 : x+7;
+  const ly = y-14+bob;
+  ctx.fillStyle = C.lanternMetal;
+  ctx.fillRect(lx+2, ly-2, 1, 3);
+  ctx.fillStyle = '#3a2410';
+  ctx.fillRect(lx, ly+1, 5, 7);
+  ctx.fillStyle = C.lanternGlow;
+  ctx.fillRect(lx+1, ly+2, 3, 5);
+  ctx.fillStyle = C.lanternHot;
+  ctx.fillRect(lx+2, ly+3, 1, 3);
+  ctx.fillStyle = 'rgba(255,220,150,'+(0.6+Math.sin(G.time*10)*0.2)+')';
+  ctx.fillRect(lx+2, ly+4, 1, 1);
+
+  ctx.globalAlpha = 1;
+}
+
+function drawParticles(){
+  for (const p of particles){
+    const a = clamp(p.life/p.maxLife, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(Math.floor(p.x), Math.floor(p.y), p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  for (const f of floatTexts){
+    const a = clamp(f.life/f.maxLife, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = f.color;
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(f.text, Math.floor(f.x), Math.floor(f.y));
+  }
+  ctx.textAlign = 'left';
+  ctx.globalAlpha = 1;
+}
+
+/* ---------- 15. 黑暗遮罩 ---------- */
+function drawDarkness(){
+  if (!player) return;
+  const dawn = G.dawn;
+  const darknessAlpha = lerp(0.95, 0.15, dawn);
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(2,2,10,'+darknessAlpha+')';
+  ctx.fillRect(0,0,GW,GH);
+
+  ctx.globalCompositeOperation = 'destination-out';
+
+  const lx = player.x, ly = player.y - 8, lr = player.lanternRadius;
+  const grad = ctx.createRadialGradient(lx, ly, 0, lx, ly, lr);
+  grad.addColorStop(0, 'rgba(0,0,0,1)');
+  grad.addColorStop(0.55, 'rgba(0,0,0,0.9)');
+  grad.addColorStop(0.85, 'rgba(0,0,0,0.35)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(lx-lr, ly-lr, lr*2, lr*2);
+
+  for (const p of pulses){
+    const k = 1 - p.r/p.maxR;
+    const g = ctx.createRadialGradient(p.x, p.y, Math.max(1,p.r-30), p.x, p.y, p.r+10);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(0.7, 'rgba(0,0,0,'+(0.5*k)+')');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(p.x-p.r-10, p.y-p.r-10, (p.r+10)*2, (p.r+10)*2);
+  }
+
+  for (const o of oilDrops){
+    const g = ctx.createRadialGradient(o.x, o.y, 0, o.x, o.y, 14);
+    g.addColorStop(0, 'rgba(0,0,0,0.5)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(o.x-14, o.y-14, 28, 28);
+  }
+  for (const m of memories){
+    const g = ctx.createRadialGradient(m.x, m.y, 0, m.x, m.y, 18);
+    g.addColorStop(0, 'rgba(0,0,0,0.55)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(m.x-18, m.y-18, 36, 36);
+  }
+
+  ctx.restore();
+}
+
+function drawWarmGlow(){
+  if (!player) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+
+  const lx = player.x, ly = player.y-8, lr = player.lanternRadius;
+  const grad = ctx.createRadialGradient(lx, ly, 0, lx, ly, lr*1.1);
+  grad.addColorStop(0, 'rgba(255,190,90,0.22)');
+  grad.addColorStop(0.5, 'rgba(255,140,50,0.08)');
+  grad.addColorStop(1, 'rgba(255,100,20,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(lx-lr, ly-lr, lr*2, lr*2);
+
+  if (player.flareTimer > 0){
+    const fk = player.flareTimer / FLARE_DURATION;
+    const g2 = ctx.createRadialGradient(lx, ly, 0, lx, ly, lr*1.4);
+    g2.addColorStop(0, 'rgba(255,220,140,'+(0.25*fk)+')');
+    g2.addColorStop(1, 'rgba(255,180,60,0)');
+    ctx.fillStyle = g2;
+    ctx.fillRect(lx-lr*1.4, ly-lr*1.4, lr*2.8, lr*2.8);
+  }
+
+  for (const p of pulses){
+    const k = 1 - p.r/p.maxR;
+    const g = ctx.createRadialGradient(p.x, p.y, Math.max(1,p.r-16), p.x, p.y, p.r+4);
+    g.addColorStop(0, 'rgba(255,255,255,0)');
+    g.addColorStop(0.5, 'rgba(200,230,255,'+(0.18*k)+')');
+    g.addColorStop(1, 'rgba(255,220,150,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(p.x-p.r-4, p.y-p.r-4, (p.r+4)*2, (p.r+4)*2);
+  }
+
+  if (G.dawn > 0){
+    const g = ctx.createLinearGradient(0,0,0,GH);
+    g.addColorStop(0, 'rgba(255,200,120,'+(G.dawn*0.4)+')');
+    g.addColorStop(0.5, 'rgba(255,150,80,'+(G.dawn*0.15)+')');
+    g.addColorStop(1, 'rgba(255,100,60,'+(G.dawn*0.08)+')');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,GW,GH);
+  }
+  ctx.restore();
+}
+
+function drawEdgeWarning(){
+  if (!player || G.state !== 'playing') return;
+  let threat = 0;
+  for (const s of shadows){
+    if (s.dying) continue;
+    const d = dist(s.x, s.y, player.x, player.y);
+    if (d < 90) threat = Math.max(threat, 1 - d/90);
+  }
+  if (threat > 0){
+    const g = ctx.createRadialGradient(GW/2, GH/2, GH*0.35, GW/2, GH/2, GH*0.75);
+    g.addColorStop(0, 'rgba(150,20,30,0)');
+    g.addColorStop(1, 'rgba(150,20,30,'+(threat*0.35)+')');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,GW,GH);
+  }
+}
+
+/* ---------- 16. HUD ---------- */
+function drawHUD(){
+  ctx.font = '8px monospace';
+  ctx.fillStyle = C.uiDim;
+  ctx.fillText('LIFE', 8, 12);
+  for (let i=0;i<PLAYER_MAX_HP;i++){
+    const filled = i < (player? player.hp : 0);
+    ctx.fillStyle = filled ? C.hpFull : C.hpEmpty;
+    ctx.fillRect(28+i*10, 5, 6, 6);
+    if (filled){ ctx.fillStyle = '#fff2c0'; ctx.fillRect(30+i*10, 7, 2, 2); }
+  }
+
+  ctx.fillStyle = C.uiDim; ctx.fillText('OIL', 8, 26);
+  ctx.strokeStyle = C.uiDim; ctx.strokeRect(28, 20, 60, 5);
+  const oilW = player ? (player.oil/PLAYER_MAX_OIL)*58 : 0;
+  ctx.fillStyle = C.oil; ctx.fillRect(29, 21, oilW, 3);
+  ctx.fillStyle = C.oilGlow; ctx.fillRect(29, 21, oilW, 1);
+
+  ctx.fillStyle = C.uiDim; ctx.fillText('STA', 8, 40);
+  ctx.strokeStyle = C.uiDim; ctx.strokeRect(28, 34, 60, 5);
+  const staW = player ? (player.stamina/PLAYER_MAX_STAMINA)*58 : 0;
+  ctx.fillStyle = C.mem; ctx.fillRect(29, 35, staW, 3);
+
+  ctx.fillStyle = C.uiText; ctx.textAlign = 'right';
+  ctx.fillText('NIGHT ' + G.night + ' / ' + G.maxNight, GW-8, 12);
+  ctx.fillStyle = C.uiDim;
+  ctx.fillText('SCORE ' + G.score, GW-8, 24);
+
+  const p = G.nightPhase;
+  ctx.fillStyle = 'rgba(30,25,40,0.7)'; ctx.fillRect(0, 0, GW, 2);
+  ctx.fillStyle = G.dawn>0 ? C.transition : C.mem; ctx.fillRect(0, 0, GW*p, 2);
+
+  if (player){
+    if (player.pulseCd > 0){
+      ctx.fillStyle = 'rgba(220,240,255,0.5)';
+      ctx.fillRect(GW/2-10, GH-10, 20*player.pulseCd/PULSE_COOLDOWN, 2);
+    }
+    if (player.stamina < PULSE_COST){
+      ctx.fillStyle = 'rgba(200,80,80,0.6)';
+      ctx.textAlign = 'center';
+      ctx.fillText('体力不足', GW/2, GH-14);
+      ctx.textAlign = 'left';
+    }
+  }
+
+  // 连击
+  if (G.comboCount >= 3){
+    ctx.textAlign = 'center';
+    ctx.fillStyle = C.uiAccent;
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText('连击 x' + G.comboCount, GW/2, 70);
+    ctx.textAlign = 'left';
+    ctx.font = '8px monospace';
+  }
+
+  // 消息
+  ctx.textAlign = 'center';
+  let msgY = 44;
+  for (const m of G.messages){
+    const a = clamp((m.dur - m.time)/0.5, 0, 1) * clamp(m.time/0.3, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = 'rgba(20,16,26,0.85)';
+    ctx.fillRect(GW/2 - 145, msgY-9, 290, 13);
+    ctx.fillStyle = C.uiAccent;
+    ctx.fillText(m.text, GW/2, msgY);
+    msgY += 15;
+    ctx.globalAlpha = 1;
+  }
+  ctx.textAlign = 'left';
+}
+
+/* ---------- 17. 界面状态绘制 ---------- */
+function drawMenu(){
+  drawSky();
+  for (let i=0;i<30;i++){
+    const x = ((i*97 + Math.floor(G.menuTime*3)) % GW);
+    const y = (i*53) % (GH*0.5);
+    ctx.globalAlpha = 0.3 + 0.7*Math.abs(Math.sin(G.menuTime*0.8 + i));
+    ctx.fillStyle = C.moon;
+    ctx.fillRect(x, y, 1, 1);
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#0a0812';
+  ctx.fillRect(0, GH*0.72, GW, GH*0.28);
+  for (let i=0;i<12;i++){
+    const x = i*45 - 10;
+    const h = 20 + (i%3)*8;
+    ctx.beginPath();
+    ctx.moveTo(x, GH*0.72); ctx.lineTo(x+22, GH*0.72-h); ctx.lineTo(x+44, GH*0.72);
+    ctx.closePath(); ctx.fill();
+  }
+
+  ctx.textAlign = 'center';
+  ctx.globalAlpha = 0.85 + Math.sin(G.menuTime*2)*0.15;
+  ctx.fillStyle = C.uiAccent;
+  ctx.font = 'bold 34px serif';
+  ctx.fillText('灯  语', GW/2, GH*0.34);
+  ctx.font = '10px monospace';
+  ctx.fillStyle = C.uiText;
+  ctx.fillText('L A N T E R N   W H I S P E R', GW/2, GH*0.34 + 16);
+  ctx.globalAlpha = 1;
+
+  const blink = 0.5 + 0.5*Math.sin(G.menuTime*3);
+  ctx.globalAlpha = blink;
+  ctx.fillStyle = C.uiAccent;
+  ctx.font = '10px monospace';
+  ctx.fillText('按 ENTER / 空格 / 点屏幕 开始', GW/2, GH*0.68);
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = C.uiDim;
+  ctx.font = '8px monospace';
+  ctx.fillText('WASD/方向键 移动   J 光语   K 燃油   M 静音', GW/2, GH*0.82);
+
+  if (G.bestNight > 1 || G.bestScore > 0){
+    ctx.fillStyle = C.uiDim;
+    ctx.fillText('最远: 第'+G.bestNight+'夜   最高分: '+G.bestScore, GW/2, GH*0.92);
+  }
+  ctx.textAlign = 'left';
+}
+
+function drawPause(){
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0,0,GW,GH);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = C.uiAccent;
+  ctx.font = 'bold 20px serif';
+  ctx.fillText('暂 停', GW/2, GH/2 - 10);
+  ctx.font = '9px monospace';
+  ctx.fillStyle = C.uiText;
+  ctx.fillText('按 ESC 或 ENTER 继续', GW/2, GH/2 + 14);
+  ctx.fillText('按 R 重新开始本局', GW/2, GH/2 + 28);
+  ctx.textAlign = 'left';
+}
+
+function drawTransition(){
+  if (G.state !== 'transition') return;
+  const t = G.transitionTimer / G.transitionMax;
+  let alpha;
+  if (t < 0.2) alpha = t/0.2;
+  else if (t > 0.8) alpha = (1-t)/0.2;
+  else alpha = 1;
+
+  ctx.fillStyle = 'rgba(255,220,160,'+(alpha*0.5)+')';
+  ctx.fillRect(0,0,GW,GH);
+  ctx.fillStyle = 'rgba(4,4,12,'+(alpha*0.7)+')';
+  ctx.fillRect(0,0,GW,GH);
+
+  ctx.globalAlpha = alpha;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = C.uiAccent;
+  ctx.font = 'bold 24px serif';
+  ctx.fillText(G.transitionText, GW/2, GH/2 - 8);
+  if (G.transitionSub){
+    ctx.font = '9px monospace';
+    ctx.fillStyle = C.uiText;
+    const lines = wrapText(G.transitionSub, 60);
+    for (let i=0;i<lines.length;i++) ctx.fillText(lines[i], GW/2, GH/2 + 14 + i*12);
+  }
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'left';
+}
+
+function drawGameOver(){
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0,0,GW,GH);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = C.danger;
+  ctx.font = 'bold 24px serif';
+  ctx.fillText('灯 灭 了', GW/2, GH*0.35);
+
+  ctx.fillStyle = C.uiText;
+  ctx.font = '9px monospace';
+  ctx.fillText('你在第 ' + G.night + ' 夜倒下', GW/2, GH*0.42);
+  ctx.fillText('得分: ' + G.score, GW/2, GH*0.46);
+  ctx.fillText('记忆碎片: ' + G.memoryCount, GW/2, GH*0.50);
+
+  const blink = 0.5 + 0.5*Math.sin(G.time*3);
+  ctx.globalAlpha = blink;
+  ctx.fillStyle = C.uiAccent;
+  ctx.fillText('按 ENTER / 空格 / 点屏幕 返回', GW/2, GH*0.68);
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'left';
+}
+
+function drawVictory(){
+  ctx.fillStyle = 'rgba(255,220,160,0.15)';
+  ctx.fillRect(0,0,GW,GH);
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(0,0,GW,GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = C.transition;
+  ctx.font = 'bold 26px serif';
+  ctx.fillText('天 亮 了', GW/2, GH*0.32);
+
+  ctx.fillStyle = C.uiText;
+  ctx.font = '9px monospace';
+  ctx.fillText('你守住了三夜', GW/2, GH*0.40);
+  ctx.fillText('得分: ' + G.score, GW/2, GH*0.44);
+  ctx.fillText('记忆碎片: ' + G.memoryCount + ' / 10', GW/2, GH*0.48);
+
+  let epilogue;
+  if (G.memoryCount >= 8) epilogue = '你终于想起来了。原来, 你就是那个留下来的人。';
+  else if (G.memoryCount >= 4) epilogue = '有些事你还没想起来, 但晨光会慢慢告诉你。';
+  else epilogue = '你活下来了, 但很多东西留在了黑夜里。';
+
+  const lines = wrapText(epilogue, 50);
+  ctx.fillStyle = C.uiAccent;
+  for (let i=0;i<lines.length;i++) ctx.fillText(lines[i], GW/2, GH*0.58 + i*12);
+
+  const blink = 0.5 + 0.5*Math.sin(G.time*3);
+  ctx.globalAlpha = blink;
+  ctx.fillStyle = C.uiAccent;
+  ctx.fillText('按 ENTER / 空格 / 点屏幕 返回', GW/2, GH*0.80);
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'left';
+}
+
+function wrapText(text, maxChars){
+  const lines = [];
+  let cur = '';
+  for (const ch of text){
+    cur += ch;
+    if (cur.length >= maxChars){ lines.push(cur); cur = ''; }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+/* ---------- 18. 主渲染 ---------- */
+function drawWorldScene(){
+  drawSky();
+  drawMountains();
+  drawGround();
+  drawHouses();
+  drawOil();
+  drawMemories();
+  for (const s of shadows) drawShadow(s);
+  drawPulses();
+  if (player) drawPlayer();
+  drawParticles();
+  drawDarkness();
+  drawWarmGlow();
+  drawEdgeWarning();
+  if (G.state !== 'gameover' && G.state !== 'victory' && G.state !== 'transition') drawHUD();
+}
+
+function render(){
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0,0,GW,GH);
+
+  ctx.save();
+  if (G.shake > 0){
+    ctx.translate((Math.random()-0.5)*G.shake*2, (Math.random()-0.5)*G.shake*2);
+  }
+
+  if (G.state === 'menu'){ drawMenu(); }
+  else if (G.state === 'transition'){ drawWorldScene(); drawTransition(); }
+  else if (G.state === 'gameover'){ drawWorldScene(); drawGameOver(); }
+  else if (G.state === 'victory'){ drawWorldScene(); drawVictory(); }
+  else if (G.state === 'playing' || G.state === 'paused' || G.state === 'dying'){
+    drawWorldScene();
+    if (G.state === 'paused') drawPause();
+  }
+
+  if (G.flash > 0){
+    ctx.fillStyle = 'rgba(255,240,200,'+G.flash+')';
+    ctx.fillRect(0,0,GW,GH);
+  }
+  ctx.restore();
+
+  ctx.strokeStyle = 'rgba(80,60,40,0.35)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0.5, 0.5, GW-1, GH-1);
+}
+
+/* ---------- 19. 主循环 ---------- */
+let lastTime = 0;
+function loop(t){
+  if (!lastTime) lastTime = t;
+  let dt = (t - lastTime) / 1000;
+  lastTime = t;
+  if (dt > 0.05) dt = 0.05;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+/* ---------- 20. 启动 ---------- */
+function boot(){
+  generateStars();
+  generateMountains();
+  generateWorld();
+  createPlayer();
+  requestAnimationFrame(loop);
+}
+boot();
+</script>
+</body>
+</html>
