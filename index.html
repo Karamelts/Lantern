@@ -46,10 +46,10 @@
 'use strict';
 /* ============================================================
    灯语 · Lantern Whisper
-   A pixel art night watchman game.
+   fix: darkness 遮罩改用离屏 canvas + 难度平衡
    ============================================================ */
 
-/* ---------- 0. 基础工具 ---------- */
+/* ---------- 基础工具 ---------- */
 const GW = 480, GH = 300;
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -66,6 +66,12 @@ function fitCanvas(){
 window.addEventListener('resize', fitCanvas);
 fitCanvas();
 
+/* 离屏遮罩 canvas —— 修复"什么都看不到"的核心 */
+const darkCanvas = document.createElement('canvas');
+darkCanvas.width = GW; darkCanvas.height = GH;
+const dctx = darkCanvas.getContext('2d');
+dctx.imageSmoothingEnabled = false;
+
 const TAU = Math.PI*2;
 const rand = (a,b)=>a+Math.random()*(b-a);
 const randInt = (a,b)=>Math.floor(rand(a,b+1));
@@ -74,9 +80,8 @@ const clamp = (v,a,b)=>v<a?a:v>b?b:v;
 const lerp = (a,b,t)=>a+(b-a)*t;
 const dist2 = (ax,ay,bx,by)=>{const dx=ax-bx,dy=ay-by;return dx*dx+dy*dy;};
 const dist = (ax,ay,bx,by)=>Math.hypot(ax-bx,ay-by);
-const easeOut = t=>1-(1-t)*(1-t);
 
-/* ---------- 1. 调色板 ---------- */
+/* ---------- 调色板 ---------- */
 const C = {
   skyTop:'#04040c', skyMid:'#0b0b20', skyLow:'#181026',
   moon:'#f0e8c8', moonHalo:'rgba(240,232,200,0.18)',
@@ -99,7 +104,7 @@ const C = {
   transition:'#ffe7c0',
 };
 
-/* ---------- 2. 音频引擎 ---------- */
+/* ---------- 音频 ---------- */
 let AC=null, masterGain=null, ambientNodes=null, muted=false;
 
 function initAudio(){
@@ -169,7 +174,7 @@ const soundNight = ()=>[523,659,784].forEach((f,i)=>setTimeout(()=>sfx(f,0.5,'si
 const soundDawn  = ()=>[523,659,784,1047,1319].forEach((f,i)=>setTimeout(()=>sfx(f,0.8,'sine',0.14),i*180));
 const soundDeath = ()=>[440,330,262,196].forEach((f,i)=>setTimeout(()=>sfx(f,0.4,'sawtooth',0.2),i*150));
 
-/* ---------- 3. 输入 ---------- */
+/* ---------- 输入 ---------- */
 const keys = new Set();
 const justPressed = new Set();
 
@@ -205,7 +210,6 @@ window.addEventListener('keyup', e=>{
   if (e.key === ' ') keys.delete('pulse');
 });
 
-/* 触摸 */
 const touchEl = document.getElementById('touch');
 if ('ontouchstart' in window || navigator.maxTouchPoints>0) touchEl.style.display = 'flex';
 touchEl.querySelectorAll('button').forEach(btn=>{
@@ -218,7 +222,6 @@ touchEl.querySelectorAll('button').forEach(btn=>{
   btn.addEventListener('touchcancel', up);
 });
 
-/* 点击画布 = 确认（兼容移动端开始/重开） */
 canvas.addEventListener('pointerdown', ()=>{
   initAudio();
   if (G.state==='menu' || G.state==='gameover' || G.state==='victory') {
@@ -226,76 +229,45 @@ canvas.addEventListener('pointerdown', ()=>{
   }
 });
 
-/* ---------- 4. 游戏常量 ---------- */
+/* ---------- 常量（已调优） ---------- */
 const PLAYER_SPEED = 72;
 const PLAYER_RADIUS = 5;
 const PLAYER_MAX_HP = 3;
 const PLAYER_MAX_OIL = 100;
 const PLAYER_MAX_STAMINA = 100;
-const OIL_DRAIN = 1.0;
-const STAMINA_REGEN = 22;
+const OIL_DRAIN = 0.8;              // 从 1.0 降到 0.8
+const STAMINA_REGEN = 24;
 const PULSE_COST = 25;
 const PULSE_COOLDOWN = 0.9;
-const PULSE_MAX_R = 100;
+const PULSE_MAX_R = 110;
 const PULSE_SPEED = 240;
 const PULSE_DAMAGE = 2;
 const FLARE_COST = 25;
 const FLARE_DURATION = 3.5;
 const FLARE_RADIUS_MULT = 2.2;
-const LIGHT_DPS = 1.6;
-const NIGHT_DURATION = 50;
-const INVULN_TIME = 1.1;
+const LIGHT_DPS = 1.8;              // 略微提高，补偿更快结束的夜晚
+const NIGHT_DURATION = 60;          // 从 50 提到 60
+const INVULN_TIME = 1.3;            // 从 1.1 提到 1.3
 const PICKUP_RADIUS = 9;
-const BOSS_AT_PHASE = 0.74;
+const BOSS_AT_PHASE = 0.70;
 
-/* ---------- 5. 全局状态 ---------- */
+/* ---------- 全局状态 ---------- */
 const G = {
-  state:'menu',
-  time:0,
-  night:1,
-  maxNight:3,
-  nightTimer:0,
-  nightPhase:0,
-  score:0,
-  bestNight:1,
-  bestScore:0,
-  transitionTimer:0,
-  transitionMax:0,
-  transitionText:'',
-  transitionSub:'',
-  transitionCallback:null,
-  shake:0,
-  flash:0,
-  dawn:0,
-  pausedFrom:null,
-  deathTimer:0,
-  messages:[],
-  menuTime:0,
-  memoryCount:0,
-  totalShadows:0,
-  comboCount:0,
-  comboTimer:0,
-  bossSpawned:false,
+  state:'menu', time:0, night:1, maxNight:3,
+  nightTimer:0, nightPhase:0, score:0,
+  bestNight:1, bestScore:0,
+  transitionTimer:0, transitionMax:0, transitionText:'', transitionSub:'', transitionCallback:null,
+  shake:0, flash:0, dawn:0, pausedFrom:null, deathTimer:0,
+  messages:[], menuTime:0, memoryCount:0, totalShadows:0,
+  comboCount:0, comboTimer:0, bossSpawned:false,
+  spawnBuffer:0,                    // 新增：初始/受伤缓冲
 };
 
-/* ---------- 6. 世界数据 ---------- */
+/* ---------- 世界数据 ---------- */
 let player;
-let shadows = [];
-let oilDrops = [];
-let memories = [];
-let pulses = [];
-let particles = [];
-let floatTexts = [];
-let trees = [];
-let bushes = [];
-let rocks = [];
-let stars = [];
-let houses = [];
-let mountainsFar = [];
-let mountainsNear = [];
-let spawnAccum = 0;
-let nextSpawnInterval = 2.2;
-let gameTime = 0;
+let shadows = [], oilDrops = [], memories = [], pulses = [], particles = [], floatTexts = [];
+let trees = [], bushes = [], rocks = [], stars = [], houses = [], mountainsFar = [], mountainsNear = [];
+let spawnAccum = 0, nextSpawnInterval = 3.0, gameTime = 0;
 
 const MEMORY_LINES = [
   '他们说, 灯油用完之前, 黎明会来的。',
@@ -310,18 +282,14 @@ const MEMORY_LINES = [
   '天亮之前, 不要回头看。',
 ];
 
-/* ---------- 7. 世界生成 ---------- */
+/* ---------- 世界生成 ---------- */
 function generateStars(){
   stars = [];
-  for (let i=0;i<80;i++){
-    stars.push({
-      x: rand(0,GW), y: rand(0, GH*0.55),
-      s: Math.random()<0.15?2:1,
-      base: rand(0.2,0.9),
-      phase: rand(0,TAU),
-      speed: rand(0.5,2.0),
-    });
-  }
+  for (let i=0;i<80;i++) stars.push({
+    x: rand(0,GW), y: rand(0, GH*0.55),
+    s: Math.random()<0.15?2:1,
+    base: rand(0.2,0.9), phase: rand(0,TAU), speed: rand(0.5,2.0),
+  });
 }
 
 function generateMountains(){
@@ -346,30 +314,31 @@ function generateWorld(){
   for (let i=0;i<22;i++) bushes.push({x: rand(10,GW-10), y: rand(GH*0.5, GH-6), w: randInt(3,7), h: randInt(2,4), shade: Math.random()<0.5?0:1});
 }
 
-/* ---------- 8. 玩家 ---------- */
+/* ---------- 玩家 ---------- */
 function createPlayer(){
   player = {
-    x: GW/2, y: GH*0.72, vx:0, vy:0,
+    x: GW/2, y: GH*0.72,
     facing:'up', walkFrame:0, walkTimer:0, moving:false,
     hp: PLAYER_MAX_HP, oil: PLAYER_MAX_OIL, stamina: PLAYER_MAX_STAMINA,
-    lanternRadius:52, lanternBase:52, targetRadius:52,
+    lanternRadius:60, lanternBase:60, targetRadius:60,
     flareTimer:0, invulnTimer:0, pulseCd:0,
     bob:0, bobTime:0,
   };
 }
 
-/* ---------- 9. 实体 ---------- */
+/* ---------- 实体 ---------- */
 function spawnShadow(type){
   const angle = rand(0, TAU);
-  const r = rand(140, 230);
+  const r = rand(150, 240);
   let x = clamp(player.x + Math.cos(angle)*r, 8, GW-8);
-  let y = clamp(player.y + Math.sin(angle)*r*0.75, GH*0.3, GH-6);
+  let y = clamp(player.y + Math.sin(angle)*r*0.75, GH*0.28, GH-6);
 
+  // 减速后的定义
   const defs = {
-    shadow: {hp:3, speed:32, size:8,  dmg:1, xp:1},
-    fast:   {hp:2, speed:66, size:6,  dmg:1, xp:2},
-    heavy:  {hp:9, speed:20, size:14, dmg:2, xp:4},
-    boss:   {hp:22,speed:16, size:22, dmg:2, xp:10},
+    shadow: {hp:3, speed:24, size:8,  dmg:1, xp:1},
+    fast:   {hp:2, speed:48, size:6,  dmg:1, xp:2},
+    heavy:  {hp:9, speed:16, size:14, dmg:2, xp:4},
+    boss:   {hp:16,speed:13, size:22, dmg:2, xp:10},
   };
   const d = defs[type] || defs.shadow;
 
@@ -382,40 +351,32 @@ function spawnShadow(type){
 }
 
 function spawnBoss(){
-  // 主影从屏幕外飘进来
   const fromLeft = Math.random()<0.5;
   shadows.push({
-    x: fromLeft? -30 : GW+30,
-    y: GH*0.5,
-    type:'boss',
-    hp:22, maxHp:22, speed:16, size:22, dmg:2, xp:10,
+    x: fromLeft? -30 : GW+30, y: GH*0.5, type:'boss',
+    hp:16, maxHp:16, speed:13, size:22, dmg:2, xp:10,
     stunTimer:0, animTime:rand(0,10), wobblePhase:rand(0,TAU),
-    hitFlash:0, dying:false, deathTimer:0,
-    boss:true,
+    hitFlash:0, dying:false, deathTimer:0, boss:true,
   });
 }
 
 function spawnOil(x, y, amt){
   oilDrops.push({x, y, bobPhase:rand(0,TAU), life:20, picked:false, amt: amt||22});
 }
-
 function spawnMemory(x, y){
   memories.push({x, y, bobPhase:rand(0,TAU), life:30, picked:false, text: choose(MEMORY_LINES)});
 }
-
 function spawnParticle(x, y, vx, vy, life, color, size, gravity){
   particles.push({x,y,vx,vy,life,maxLife:life,color,size,gravity:gravity||0});
 }
-
 function spawnFloatText(x, y, text, color, life){
   floatTexts.push({x,y,text,color:color||C.uiAccent,life:life||1.0,maxLife:life||1.0,vy:-20});
 }
-
 function pushMessage(text, dur){
   G.messages.push({text, time:0, dur: dur||2.5});
 }
 
-/* ---------- 10. 夜晚开始 ---------- */
+/* ---------- 开始夜晚 ---------- */
 function startNight(n){
   G.night = n;
   G.nightTimer = 0;
@@ -427,33 +388,37 @@ function startNight(n){
   G.comboTimer = 0;
   G.bossSpawned = false;
 
-  shadows.length = 0;
-  oilDrops.length = 0;
-  memories.length = 0;
-  pulses.length = 0;
-  particles.length = 0;
-  floatTexts.length = 0;
-  spawnAccum = 0;
-  nextSpawnInterval = Math.max(0.55, 2.0 - n*0.35);
+  // 初始缓冲：第一夜 5 秒，第二夜 3.5 秒，第三夜 2.5 秒
+  G.spawnBuffer = 5 - (n-1)*1.25;
 
-  keys.clear();
-  justPressed.clear();
+  shadows.length = 0; oilDrops.length = 0; memories.length = 0;
+  pulses.length = 0; particles.length = 0; floatTexts.length = 0;
+  spawnAccum = 0;
+  nextSpawnInterval = Math.max(1.2, 3.0 - (n-1)*0.4);
+
+  keys.clear(); justPressed.clear();
 
   createPlayer();
-  player.lanternRadius = player.lanternBase = 48 + n*3;
+  // 灯笼半径：第一夜 68，第二夜 76，第三夜 84
+  player.lanternRadius = player.lanternBase = 60 + n*8;
   player.targetRadius = player.lanternRadius;
 
-  for (let i=0;i<4+n;i++) spawnOil(rand(40,GW-40), rand(GH*0.45, GH-20));
-  for (let i=0;i<1+n;i++) spawnMemory(rand(40,GW-40), rand(GH*0.4, GH-20));
+  for (let i=0;i<5+n;i++) spawnOil(rand(40,GW-40), rand(GH*0.45, GH-20));
+  for (let i=0;i<2+n;i++) spawnMemory(rand(40,GW-40), rand(GH*0.4, GH-20));
 
-  if (n >= 2) for (let i=0;i<n-1;i++) spawnShadow('shadow');
+  if (n >= 2) for (let i=0;i<(n-1);i++) spawnShadow('shadow');
 
   soundNight();
   const names = ['', '第一夜 · 起雾', '第二夜 · 回响', '第三夜 · 灰烬'];
   pushMessage(names[n] || ('第'+n+'夜'), 2.5);
+
+  // 第一夜加操作提示
+  if (n === 1) {
+    setTimeout(()=>{ if (G.state === 'playing' && G.night === 1) pushMessage('WASD 移动 · J 光语 · K 燃油', 4.5); }, 400);
+  }
 }
 
-/* ---------- 11. 更新 ---------- */
+/* ---------- 更新 ---------- */
 function updatePlayer(dt){
   if (player.hp <= 0) return;
 
@@ -478,7 +443,7 @@ function updatePlayer(dt){
   player.bob = Math.sin(player.bobTime);
 
   player.x = clamp(player.x, 6, GW-6);
-  player.y = clamp(player.y, GH*0.30, GH-6);
+  player.y = clamp(player.y, GH*0.28, GH-6);
 
   player.oil = Math.max(0, player.oil - OIL_DRAIN*dt);
   player.stamina = Math.min(PLAYER_MAX_STAMINA, player.stamina + STAMINA_REGEN*dt);
@@ -580,8 +545,6 @@ function killShadow(s){
   s.deathTimer = 0.4;
   G.score += s.xp*5;
   G.totalShadows++;
-
-  // 连击
   G.comboCount++;
   G.comboTimer = 2.5;
   if (G.comboCount >= 3){
@@ -589,10 +552,9 @@ function killShadow(s){
     G.score += bonus;
     spawnFloatText(s.x, s.y-10, '连击 x'+G.comboCount, C.uiAccent, 0.9);
   }
-
   soundKill();
   for (let i=0;i<10;i++) spawnParticle(s.x, s.y, rand(-50,50), rand(-60,20), rand(0.4,0.8), C.shadowEdge, rand(1,2), 60);
-  if (Math.random() < 0.22) spawnOil(s.x, s.y);
+  if (Math.random() < 0.28) spawnOil(s.x, s.y);
 }
 
 function updateShadows(dt){
@@ -626,7 +588,7 @@ function updateShadows(dt){
     }
 
     s.x = clamp(s.x, 4, GW-4);
-    s.y = clamp(s.y, GH*0.25, GH-4);
+    s.y = clamp(s.y, GH*0.22, GH-4);
   }
 }
 
@@ -635,14 +597,16 @@ function hurtPlayer(dmg, fromX, fromY){
   player.hp -= dmg;
   player.invulnTimer = INVULN_TIME;
   G.shake = Math.min(6, G.shake + 4);
-  G.flash = Math.min(0.6, G.flash + 0.4);
+  G.flash = Math.min(0.5, G.flash + 0.35);
+  // 受伤后给玩家喘息：暂停生成 1.5 秒
+  G.spawnBuffer = Math.max(G.spawnBuffer, 1.5);
   soundHurt();
   for (let i=0;i<14;i++) spawnParticle(player.x, player.y-8, rand(-80,80), rand(-100,0), rand(0.4,0.8), C.danger, rand(1,2), 100);
   if (fromX!==undefined){
     const dx = player.x - fromX, dy = player.y - fromY;
     const d = Math.hypot(dx,dy) || 1;
     player.x = clamp(player.x + dx/d*12, 6, GW-6);
-    player.y = clamp(player.y + dy/d*12, GH*0.3, GH-6);
+    player.y = clamp(player.y + dy/d*12, GH*0.28, GH-6);
   }
   if (player.hp <= 0){
     player.hp = 0;
@@ -681,22 +645,27 @@ function updateOilAndMemory(dt){
 }
 
 function updateSpawning(dt){
+  // 初始/受伤缓冲：期间不刷怪
+  if (G.spawnBuffer > 0){
+    G.spawnBuffer -= dt;
+    return;
+  }
   if (G.nightPhase > 0.95) return;
+
   spawnAccum += dt;
   const progress = G.nightPhase;
-  const interval = lerp(nextSpawnInterval, Math.max(0.4, nextSpawnInterval*0.45), progress);
-  if (spawnAccum >= interval && shadows.length < 14){
+  const interval = lerp(nextSpawnInterval, Math.max(1.0, nextSpawnInterval*0.55), progress);
+  if (spawnAccum >= interval && shadows.length < 12){
     spawnAccum = 0;
     let type = 'shadow';
     const r = Math.random();
-    if (G.night >= 2 && r < 0.28) type = 'fast';
-    if (G.night >= 3 && r > 0.88) type = 'heavy';
+    if (G.night >= 2 && r < 0.25) type = 'fast';
+    if (G.night >= 3 && r > 0.9) type = 'heavy';
     spawnShadow(type);
   }
-  if (Math.random() < dt*0.25 && oilDrops.length < 5) spawnOil(rand(40,GW-40), rand(GH*0.45, GH-20));
-  if (Math.random() < dt*0.06 && memories.length < 2 && G.memoryCount < 8) spawnMemory(rand(40,GW-40), rand(GH*0.4, GH-20));
+  if (Math.random() < dt*0.3 && oilDrops.length < 6) spawnOil(rand(40,GW-40), rand(GH*0.45, GH-20));
+  if (Math.random() < dt*0.08 && memories.length < 2 && G.memoryCount < 10) spawnMemory(rand(40,GW-40), rand(GH*0.4, GH-20));
 
-  // 主影
   if (!G.bossSpawned && G.nightPhase > BOSS_AT_PHASE){
     G.bossSpawned = true;
     spawnBoss();
@@ -786,12 +755,11 @@ function updateTransition(dt){
   }
 }
 
-/* ---------- 12. 状态输入 ---------- */
+/* ---------- 状态输入 ---------- */
 function handleMenuInput(){
   if (justPressed.has('confirm') || justPressed.has('pulse')){
     initAudio();
-    G.score = 0;
-    G.memoryCount = 0;
+    G.score = 0; G.memoryCount = 0;
     startNight(1);
   }
 }
@@ -816,7 +784,7 @@ function handleVictoryInput(){
   }
 }
 
-/* ---------- 13. 主更新 ---------- */
+/* ---------- 主更新 ---------- */
 function update(dt){
   G.time += dt;
 
@@ -838,14 +806,11 @@ function update(dt){
   justPressed.clear();
 }
 
-/* ---------- 14. 渲染 ---------- */
+/* ---------- 渲染：天空/山/地面/屋 ---------- */
 function drawSky(){
   const g = ctx.createLinearGradient(0,0,0,GH);
-  g.addColorStop(0, C.skyTop);
-  g.addColorStop(0.5, C.skyMid);
-  g.addColorStop(1, C.skyLow);
-  ctx.fillStyle = g;
-  ctx.fillRect(0,0,GW,GH);
+  g.addColorStop(0, C.skyTop); g.addColorStop(0.5, C.skyMid); g.addColorStop(1, C.skyLow);
+  ctx.fillStyle = g; ctx.fillRect(0,0,GW,GH);
 
   for (const s of stars){
     const tw = 0.5 + 0.5*Math.sin(G.time*s.speed + s.phase);
@@ -862,26 +827,20 @@ function drawSky(){
   ctx.fillStyle = C.moon;
   ctx.beginPath(); ctx.arc(mx, my, 16, 0, TAU); ctx.fill();
   ctx.fillStyle = 'rgba(180,170,140,0.5)';
-  ctx.fillRect(mx-6, my-4, 3, 2);
-  ctx.fillRect(mx+2, my+3, 4, 3);
-  ctx.fillRect(mx-2, my+6, 2, 2);
+  ctx.fillRect(mx-6, my-4, 3, 2); ctx.fillRect(mx+2, my+3, 4, 3); ctx.fillRect(mx-2, my+6, 2, 2);
 }
 
 function drawMountains(){
   ctx.fillStyle = C.hillFar;
   for (const m of mountainsFar){
     ctx.beginPath();
-    ctx.moveTo(m.x, GH*0.5);
-    ctx.lineTo(m.x + m.w*0.5, GH*0.5 - m.h);
-    ctx.lineTo(m.x + m.w, GH*0.5);
+    ctx.moveTo(m.x, GH*0.5); ctx.lineTo(m.x + m.w*0.5, GH*0.5 - m.h); ctx.lineTo(m.x + m.w, GH*0.5);
     ctx.closePath(); ctx.fill();
   }
   ctx.fillStyle = C.hillNear;
   for (const m of mountainsNear){
     ctx.beginPath();
-    ctx.moveTo(m.x, GH*0.56);
-    ctx.lineTo(m.x + m.w*0.5, GH*0.56 - m.h);
-    ctx.lineTo(m.x + m.w, GH*0.56);
+    ctx.moveTo(m.x, GH*0.56); ctx.lineTo(m.x + m.w*0.5, GH*0.56 - m.h); ctx.lineTo(m.x + m.w, GH*0.56);
     ctx.closePath(); ctx.fill();
   }
 }
@@ -889,8 +848,7 @@ function drawMountains(){
 function drawHouses(){
   for (const h of houses){
     const x = Math.floor(h.x), y = Math.floor(h.y), w = h.w, hh = h.h;
-    ctx.fillStyle = C.house;
-    ctx.fillRect(x, y, w, hh);
+    ctx.fillStyle = C.house; ctx.fillRect(x, y, w, hh);
     ctx.fillStyle = C.houseRoof;
     ctx.beginPath();
     ctx.moveTo(x-3, y); ctx.lineTo(x + w*0.5, y - hh*0.55); ctx.lineTo(x + w + 3, y);
@@ -898,47 +856,34 @@ function drawHouses(){
     const wins = [[x+6, y+8],[x+w-14, y+8],[x+6, y+hh-14]];
     for (let i=0;i<wins.length;i++){
       const [wx, wy] = wins[i];
-      const lit = (h.seed*7 + i) % 3 !== 0;
-      if (lit){
-        ctx.fillStyle = 'rgba(255,150,50,0.18)';
-        ctx.fillRect(wx-3, wy-3, 12, 14);
-        ctx.fillStyle = C.windowGlow;
-        ctx.fillRect(wx, wy, 5, 6);
+      if ((h.seed*7 + i) % 3 !== 0){
+        ctx.fillStyle = 'rgba(255,150,50,0.18)'; ctx.fillRect(wx-3, wy-3, 12, 14);
+        ctx.fillStyle = C.windowGlow; ctx.fillRect(wx, wy, 5, 6);
       } else {
-        ctx.fillStyle = C.windowDim;
-        ctx.fillRect(wx, wy, 5, 6);
+        ctx.fillStyle = C.windowDim; ctx.fillRect(wx, wy, 5, 6);
       }
     }
   }
 }
 
 function drawGround(){
-  ctx.fillStyle = C.ground;
-  ctx.fillRect(0, GH*0.55, GW, GH*0.45);
-  ctx.fillStyle = C.ground2;
-  ctx.fillRect(0, GH*0.72, GW, GH*0.28);
-
+  ctx.fillStyle = C.ground; ctx.fillRect(0, GH*0.55, GW, GH*0.45);
+  ctx.fillStyle = C.ground2; ctx.fillRect(0, GH*0.72, GW, GH*0.28);
   for (const b of bushes){
-    const x = Math.floor(b.x), y = Math.floor(b.y);
     ctx.fillStyle = b.shade===0 ? C.bush : C.grass;
-    ctx.fillRect(x, y, b.w, b.h);
-    ctx.fillRect(x+1, y-1, b.w-2, 1);
+    ctx.fillRect(Math.floor(b.x), Math.floor(b.y), b.w, b.h);
+    ctx.fillRect(Math.floor(b.x)+1, Math.floor(b.y)-1, b.w-2, 1);
   }
   for (const r of rocks){
-    const x = Math.floor(r.x), y = Math.floor(r.y);
-    ctx.fillStyle = C.rock;
-    ctx.fillRect(x, y, r.w, r.h);
-    ctx.fillStyle = 'rgba(60,50,70,0.5)';
-    ctx.fillRect(x, y, r.w, 1);
+    ctx.fillStyle = C.rock; ctx.fillRect(Math.floor(r.x), Math.floor(r.y), r.w, r.h);
+    ctx.fillStyle = 'rgba(60,50,70,0.5)'; ctx.fillRect(Math.floor(r.x), Math.floor(r.y), r.w, 1);
   }
   for (const t of trees) drawTree(t);
 }
 
 function drawTree(t){
-  const x = Math.floor(t.x), y = Math.floor(t.y);
-  const h = t.h;
-  ctx.fillStyle = C.treeTrunk;
-  ctx.fillRect(x-1, y-h*0.35, 2, h*0.35);
+  const x = Math.floor(t.x), y = Math.floor(t.y), h = t.h;
+  ctx.fillStyle = C.treeTrunk; ctx.fillRect(x-1, y-h*0.35, 2, h*0.35);
   for (let i=0;i<3;i++){
     const layerY = y - h*0.35 - i*h*0.22;
     const layerW = (h*0.55) * (1 - i*0.2);
@@ -956,13 +901,10 @@ function drawOil(){
     const bob = Math.sin(o.bobPhase)*1.2;
     const x = Math.floor(o.x), y = Math.floor(o.y + bob);
     const g = ctx.createRadialGradient(x, y, 0, x, y, 10);
-    g.addColorStop(0, 'rgba(255,170,80,0.5)');
-    g.addColorStop(1, 'rgba(255,170,80,0)');
+    g.addColorStop(0, 'rgba(255,170,80,0.5)'); g.addColorStop(1, 'rgba(255,170,80,0)');
     ctx.fillStyle = g; ctx.fillRect(x-10, y-10, 20, 20);
-    ctx.fillStyle = C.oil;
-    ctx.fillRect(x-2, y-2, 4, 4);
-    ctx.fillStyle = C.oilGlow;
-    ctx.fillRect(x-1, y-2, 2, 2);
+    ctx.fillStyle = C.oil; ctx.fillRect(x-2, y-2, 4, 4);
+    ctx.fillStyle = C.oilGlow; ctx.fillRect(x-1, y-2, 2, 2);
   }
 }
 
@@ -971,15 +913,13 @@ function drawMemories(){
     const bob = Math.sin(m.bobPhase)*2;
     const x = Math.floor(m.x), y = Math.floor(m.y + bob);
     const g = ctx.createRadialGradient(x, y, 0, x, y, 14);
-    g.addColorStop(0, 'rgba(140,180,255,0.55)');
-    g.addColorStop(1, 'rgba(140,180,255,0)');
+    g.addColorStop(0, 'rgba(140,180,255,0.55)'); g.addColorStop(1, 'rgba(140,180,255,0)');
     ctx.fillStyle = g; ctx.fillRect(x-14, y-14, 28, 28);
     ctx.fillStyle = C.mem;
     ctx.beginPath();
     ctx.moveTo(x, y-4); ctx.lineTo(x+3, y); ctx.lineTo(x, y+4); ctx.lineTo(x-3, y);
     ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(x-1, y-1, 2, 2);
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(x-1, y-1, 2, 2);
   }
 }
 
@@ -1029,13 +969,10 @@ function drawShadow(s){
     ctx.beginPath(); ctx.arc(x, y, size, 0, TAU); ctx.fill();
     ctx.beginPath(); ctx.arc(x-6, y+3, size*0.7, 0, TAU); ctx.fill();
     ctx.beginPath(); ctx.arc(x+6, y+3, size*0.7, 0, TAU); ctx.fill();
-    // 主影的触须
     ctx.globalAlpha = baseAlpha*0.6;
     for (let i=0;i<5;i++){
       const a = t*1.5 + i*TAU/5;
-      const tx = x + Math.cos(a)*size*1.6;
-      const ty = y + Math.sin(a)*size*1.1 + size*0.4;
-      ctx.fillRect(Math.floor(tx)-1, Math.floor(ty)-1, 3, 3);
+      ctx.fillRect(Math.floor(x + Math.cos(a)*size*1.6)-1, Math.floor(y + Math.sin(a)*size*1.1 + size*0.4)-1, 3, 3);
     }
   } else {
     ctx.beginPath(); ctx.arc(x, y, size, 0, TAU); ctx.fill();
@@ -1048,65 +985,58 @@ function drawShadow(s){
   }
   ctx.globalAlpha = 1;
 
-  // 眼睛
+  // 眼睛：黑暗中也要微亮，让玩家能"感觉到"
   const eyeY = y - size*0.15;
   const blink = (Math.sin(t*2 + s.wobblePhase) > 0.95) ? 0 : 1;
   if (blink){
-    ctx.globalAlpha = 0.5 + lit*0.5;
-    ctx.fillStyle = C.shadowEyeGlow;
+    // 关键改动：眼光的 alpha 不再依赖 lit，而是有一个下限
+    const eyeAlpha = 0.28 + lit * 0.72;
     const off = size*0.35;
+    ctx.globalAlpha = eyeAlpha * 0.6;
+    ctx.fillStyle = C.shadowEyeGlow;
     ctx.fillRect(x - off - 1, eyeY, 2, 2);
     ctx.fillRect(x + off - 1, eyeY, 2, 2);
+    ctx.globalAlpha = eyeAlpha;
     ctx.fillStyle = C.shadowEye;
     ctx.fillRect(x - off, eyeY, 1, 1);
     ctx.fillRect(x + off, eyeY, 1, 1);
     ctx.globalAlpha = 1;
   }
 
-  // 主影血条
   if (s.type === 'boss' && s.hp > 0){
     const w = 60, hh = 3;
     const bx = GW/2 - w/2, by = 54;
-    ctx.fillStyle = 'rgba(20,10,25,0.85)';
-    ctx.fillRect(bx-1, by-1, w+2, hh+2);
-    ctx.fillStyle = '#5a1030';
-    ctx.fillRect(bx, by, w, hh);
-    ctx.fillStyle = '#cc3344';
-    ctx.fillRect(bx, by, w * (s.hp/s.maxHp), hh);
+    ctx.fillStyle = 'rgba(20,10,25,0.85)'; ctx.fillRect(bx-1, by-1, w+2, hh+2);
+    ctx.fillStyle = '#5a1030'; ctx.fillRect(bx, by, w, hh);
+    ctx.fillStyle = '#cc3344'; ctx.fillRect(bx, by, w * (s.hp/s.maxHp), hh);
   }
 }
 
 function drawPlayer(){
   if (!player) return;
   const p = player;
-  const x = Math.floor(p.x);
-  const y = Math.floor(p.y);
+  const x = Math.floor(p.x), y = Math.floor(p.y);
   const bob = Math.floor(p.bob);
 
   if (p.invulnTimer > 0 && Math.floor(p.invulnTimer*20)%2===0) ctx.globalAlpha = 0.4;
 
   ctx.fillStyle = C.playerLeg;
-  const legPhase = p.moving ? Math.floor(p.walkFrame/2) : 0;
-  ctx.fillRect(x-3, y-4, 2, 4);
-  ctx.fillRect(x+1, y-4, 2, 4);
+  ctx.fillRect(x-3, y-4, 2, 4); ctx.fillRect(x+1, y-4, 2, 4);
   if (p.moving){
+    const legPhase = Math.floor(p.walkFrame/2);
     if (legPhase===0){ ctx.fillRect(x-3, y-4, 2, 4); ctx.fillRect(x+1, y-4, 2, 3); }
     else { ctx.fillRect(x-3, y-4, 2, 3); ctx.fillRect(x+1, y-4, 2, 4); }
   }
 
-  ctx.fillStyle = C.playerCloak;
-  ctx.fillRect(x-5, y-16+bob, 10, 12);
-  ctx.fillStyle = C.playerCloakHi;
-  ctx.fillRect(x-4, y-15+bob, 8, 9);
-  ctx.fillStyle = C.playerCloak;
-  ctx.fillRect(x-4, y-5+bob, 8, 1);
+  ctx.fillStyle = C.playerCloak; ctx.fillRect(x-5, y-16+bob, 10, 12);
+  ctx.fillStyle = C.playerCloakHi; ctx.fillRect(x-4, y-15+bob, 8, 9);
+  ctx.fillStyle = C.playerCloak; ctx.fillRect(x-4, y-5+bob, 8, 1);
 
   ctx.fillStyle = C.playerHood;
   ctx.fillRect(x-4, y-24+bob, 8, 5);
   ctx.fillRect(x-5, y-22+bob, 2, 5);
   ctx.fillRect(x+3, y-22+bob, 2, 5);
-  ctx.fillStyle = C.playerFace;
-  ctx.fillRect(x-3, y-21+bob, 6, 4);
+  ctx.fillStyle = C.playerFace; ctx.fillRect(x-3, y-21+bob, 6, 4);
 
   ctx.fillStyle = '#1a0f08';
   if (p.facing === 'left') ctx.fillRect(x-3, y-20+bob, 1, 1);
@@ -1116,21 +1046,17 @@ function drawPlayer(){
   const left = p.facing === 'left';
   const lx = left ? x-11 : x+7;
   const ly = y-14+bob;
-  ctx.fillStyle = C.lanternMetal;
-  ctx.fillRect(lx+2, ly-2, 1, 3);
-  ctx.fillStyle = '#3a2410';
-  ctx.fillRect(lx, ly+1, 5, 7);
-  ctx.fillStyle = C.lanternGlow;
-  ctx.fillRect(lx+1, ly+2, 3, 5);
-  ctx.fillStyle = C.lanternHot;
-  ctx.fillRect(lx+2, ly+3, 1, 3);
+  ctx.fillStyle = C.lanternMetal; ctx.fillRect(lx+2, ly-2, 1, 3);
+  ctx.fillStyle = '#3a2410'; ctx.fillRect(lx, ly+1, 5, 7);
+  ctx.fillStyle = C.lanternGlow; ctx.fillRect(lx+1, ly+2, 3, 5);
+  ctx.fillStyle = C.lanternHot; ctx.fillRect(lx+2, ly+3, 1, 3);
   ctx.fillStyle = 'rgba(255,220,150,'+(0.6+Math.sin(G.time*10)*0.2)+')';
   ctx.fillRect(lx+2, ly+4, 1, 1);
 
   ctx.globalAlpha = 1;
 }
 
-function drawParticles(){
+function drawParticlesWorld(){
   for (const p of particles){
     const a = clamp(p.life/p.maxLife, 0, 1);
     ctx.globalAlpha = a;
@@ -1138,6 +1064,9 @@ function drawParticles(){
     ctx.fillRect(Math.floor(p.x), Math.floor(p.y), p.size, p.size);
   }
   ctx.globalAlpha = 1;
+}
+
+function drawFloatTexts(){
   for (const f of floatTexts){
     const a = clamp(f.life/f.maxLife, 0, 1);
     ctx.globalAlpha = a;
@@ -1150,54 +1079,59 @@ function drawParticles(){
   ctx.globalAlpha = 1;
 }
 
-/* ---------- 15. 黑暗遮罩 ---------- */
+/* ---------- 关键修复：离屏 canvas 遮罩 ---------- */
 function drawDarkness(){
   if (!player) return;
   const dawn = G.dawn;
-  const darknessAlpha = lerp(0.95, 0.15, dawn);
+  const darknessAlpha = lerp(0.93, 0.15, dawn);
 
-  ctx.save();
-  ctx.globalCompositeOperation = 'source-over';
-  ctx.fillStyle = 'rgba(2,2,10,'+darknessAlpha+')';
-  ctx.fillRect(0,0,GW,GH);
+  // 1. 在离屏 canvas 上画黑色遮罩
+  dctx.globalCompositeOperation = 'source-over';
+  dctx.clearRect(0, 0, GW, GH);
+  dctx.fillStyle = 'rgba(2, 2, 10, ' + darknessAlpha + ')';
+  dctx.fillRect(0, 0, GW, GH);
 
-  ctx.globalCompositeOperation = 'destination-out';
+  // 2. 在离屏 canvas 上挖洞（这里挖的只是遮罩，不影响主画布）
+  dctx.globalCompositeOperation = 'destination-out';
 
   const lx = player.x, ly = player.y - 8, lr = player.lanternRadius;
-  const grad = ctx.createRadialGradient(lx, ly, 0, lx, ly, lr);
+  const grad = dctx.createRadialGradient(lx, ly, 0, lx, ly, lr);
   grad.addColorStop(0, 'rgba(0,0,0,1)');
-  grad.addColorStop(0.55, 'rgba(0,0,0,0.9)');
-  grad.addColorStop(0.85, 'rgba(0,0,0,0.35)');
+  grad.addColorStop(0.55, 'rgba(0,0,0,0.92)');
+  grad.addColorStop(0.85, 'rgba(0,0,0,0.4)');
   grad.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = grad;
-  ctx.fillRect(lx-lr, ly-lr, lr*2, lr*2);
+  dctx.fillStyle = grad;
+  dctx.fillRect(lx-lr, ly-lr, lr*2, lr*2);
 
   for (const p of pulses){
     const k = 1 - p.r/p.maxR;
-    const g = ctx.createRadialGradient(p.x, p.y, Math.max(1,p.r-30), p.x, p.y, p.r+10);
+    const g = dctx.createRadialGradient(p.x, p.y, Math.max(1,p.r-30), p.x, p.y, p.r+10);
     g.addColorStop(0, 'rgba(0,0,0,0)');
-    g.addColorStop(0.7, 'rgba(0,0,0,'+(0.5*k)+')');
+    g.addColorStop(0.7, 'rgba(0,0,0,'+(0.6*k)+')');
     g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(p.x-p.r-10, p.y-p.r-10, (p.r+10)*2, (p.r+10)*2);
+    dctx.fillStyle = g;
+    dctx.fillRect(p.x-p.r-10, p.y-p.r-10, (p.r+10)*2, (p.r+10)*2);
   }
 
   for (const o of oilDrops){
-    const g = ctx.createRadialGradient(o.x, o.y, 0, o.x, o.y, 14);
-    g.addColorStop(0, 'rgba(0,0,0,0.5)');
+    const g = dctx.createRadialGradient(o.x, o.y, 0, o.x, o.y, 16);
+    g.addColorStop(0, 'rgba(0,0,0,0.65)');
     g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(o.x-14, o.y-14, 28, 28);
+    dctx.fillStyle = g;
+    dctx.fillRect(o.x-16, o.y-16, 32, 32);
   }
   for (const m of memories){
-    const g = ctx.createRadialGradient(m.x, m.y, 0, m.x, m.y, 18);
-    g.addColorStop(0, 'rgba(0,0,0,0.55)');
+    const g = dctx.createRadialGradient(m.x, m.y, 0, m.x, m.y, 20);
+    g.addColorStop(0, 'rgba(0,0,0,0.7)');
     g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(m.x-18, m.y-18, 36, 36);
+    dctx.fillStyle = g;
+    dctx.fillRect(m.x-20, m.y-20, 40, 40);
   }
 
-  ctx.restore();
+  dctx.globalCompositeOperation = 'source-over';
+
+  // 3. 把整个遮罩画到主画布（透明处 = 露出世界）
+  ctx.drawImage(darkCanvas, 0, 0);
 }
 
 function drawWarmGlow(){
@@ -1207,8 +1141,8 @@ function drawWarmGlow(){
 
   const lx = player.x, ly = player.y-8, lr = player.lanternRadius;
   const grad = ctx.createRadialGradient(lx, ly, 0, lx, ly, lr*1.1);
-  grad.addColorStop(0, 'rgba(255,190,90,0.22)');
-  grad.addColorStop(0.5, 'rgba(255,140,50,0.08)');
+  grad.addColorStop(0, 'rgba(255,190,90,0.32)');
+  grad.addColorStop(0.5, 'rgba(255,140,50,0.12)');
   grad.addColorStop(1, 'rgba(255,100,20,0)');
   ctx.fillStyle = grad;
   ctx.fillRect(lx-lr, ly-lr, lr*2, lr*2);
@@ -1216,7 +1150,7 @@ function drawWarmGlow(){
   if (player.flareTimer > 0){
     const fk = player.flareTimer / FLARE_DURATION;
     const g2 = ctx.createRadialGradient(lx, ly, 0, lx, ly, lr*1.4);
-    g2.addColorStop(0, 'rgba(255,220,140,'+(0.25*fk)+')');
+    g2.addColorStop(0, 'rgba(255,220,140,'+(0.3*fk)+')');
     g2.addColorStop(1, 'rgba(255,180,60,0)');
     ctx.fillStyle = g2;
     ctx.fillRect(lx-lr*1.4, ly-lr*1.4, lr*2.8, lr*2.8);
@@ -1226,7 +1160,7 @@ function drawWarmGlow(){
     const k = 1 - p.r/p.maxR;
     const g = ctx.createRadialGradient(p.x, p.y, Math.max(1,p.r-16), p.x, p.y, p.r+4);
     g.addColorStop(0, 'rgba(255,255,255,0)');
-    g.addColorStop(0.5, 'rgba(200,230,255,'+(0.18*k)+')');
+    g.addColorStop(0.5, 'rgba(200,230,255,'+(0.2*k)+')');
     g.addColorStop(1, 'rgba(255,220,150,0)');
     ctx.fillStyle = g;
     ctx.fillRect(p.x-p.r-4, p.y-p.r-4, (p.r+4)*2, (p.r+4)*2);
@@ -1249,22 +1183,21 @@ function drawEdgeWarning(){
   for (const s of shadows){
     if (s.dying) continue;
     const d = dist(s.x, s.y, player.x, player.y);
-    if (d < 90) threat = Math.max(threat, 1 - d/90);
+    if (d < 100) threat = Math.max(threat, 1 - d/100);
   }
   if (threat > 0){
     const g = ctx.createRadialGradient(GW/2, GH/2, GH*0.35, GW/2, GH/2, GH*0.75);
     g.addColorStop(0, 'rgba(150,20,30,0)');
-    g.addColorStop(1, 'rgba(150,20,30,'+(threat*0.35)+')');
+    g.addColorStop(1, 'rgba(150,20,30,'+(threat*0.4)+')');
     ctx.fillStyle = g;
     ctx.fillRect(0,0,GW,GH);
   }
 }
 
-/* ---------- 16. HUD ---------- */
+/* ---------- HUD ---------- */
 function drawHUD(){
   ctx.font = '8px monospace';
-  ctx.fillStyle = C.uiDim;
-  ctx.fillText('LIFE', 8, 12);
+  ctx.fillStyle = C.uiDim; ctx.fillText('LIFE', 8, 12);
   for (let i=0;i<PLAYER_MAX_HP;i++){
     const filled = i < (player? player.hp : 0);
     ctx.fillStyle = filled ? C.hpFull : C.hpEmpty;
@@ -1305,7 +1238,6 @@ function drawHUD(){
     }
   }
 
-  // 连击
   if (G.comboCount >= 3){
     ctx.textAlign = 'center';
     ctx.fillStyle = C.uiAccent;
@@ -1315,7 +1247,6 @@ function drawHUD(){
     ctx.font = '8px monospace';
   }
 
-  // 消息
   ctx.textAlign = 'center';
   let msgY = 44;
   for (const m of G.messages){
@@ -1331,7 +1262,7 @@ function drawHUD(){
   ctx.textAlign = 'left';
 }
 
-/* ---------- 17. 界面状态绘制 ---------- */
+/* ---------- 界面状态 ---------- */
 function drawMenu(){
   drawSky();
   for (let i=0;i<30;i++){
@@ -1343,11 +1274,9 @@ function drawMenu(){
   }
   ctx.globalAlpha = 1;
 
-  ctx.fillStyle = '#0a0812';
-  ctx.fillRect(0, GH*0.72, GW, GH*0.28);
+  ctx.fillStyle = '#0a0812'; ctx.fillRect(0, GH*0.72, GW, GH*0.28);
   for (let i=0;i<12;i++){
-    const x = i*45 - 10;
-    const h = 20 + (i%3)*8;
+    const x = i*45 - 10, h = 20 + (i%3)*8;
     ctx.beginPath();
     ctx.moveTo(x, GH*0.72); ctx.lineTo(x+22, GH*0.72-h); ctx.lineTo(x+44, GH*0.72);
     ctx.closePath(); ctx.fill();
@@ -1355,23 +1284,19 @@ function drawMenu(){
 
   ctx.textAlign = 'center';
   ctx.globalAlpha = 0.85 + Math.sin(G.menuTime*2)*0.15;
-  ctx.fillStyle = C.uiAccent;
-  ctx.font = 'bold 34px serif';
+  ctx.fillStyle = C.uiAccent; ctx.font = 'bold 34px serif';
   ctx.fillText('灯  语', GW/2, GH*0.34);
-  ctx.font = '10px monospace';
-  ctx.fillStyle = C.uiText;
+  ctx.font = '10px monospace'; ctx.fillStyle = C.uiText;
   ctx.fillText('L A N T E R N   W H I S P E R', GW/2, GH*0.34 + 16);
   ctx.globalAlpha = 1;
 
   const blink = 0.5 + 0.5*Math.sin(G.menuTime*3);
   ctx.globalAlpha = blink;
-  ctx.fillStyle = C.uiAccent;
-  ctx.font = '10px monospace';
+  ctx.fillStyle = C.uiAccent; ctx.font = '10px monospace';
   ctx.fillText('按 ENTER / 空格 / 点屏幕 开始', GW/2, GH*0.68);
   ctx.globalAlpha = 1;
 
-  ctx.fillStyle = C.uiDim;
-  ctx.font = '8px monospace';
+  ctx.fillStyle = C.uiDim; ctx.font = '8px monospace';
   ctx.fillText('WASD/方向键 移动   J 光语   K 燃油   M 静音', GW/2, GH*0.82);
 
   if (G.bestNight > 1 || G.bestScore > 0){
@@ -1382,17 +1307,21 @@ function drawMenu(){
 }
 
 function drawPause(){
-  ctx.fillStyle = 'rgba(0,0,0,0.7)';
-  ctx.fillRect(0,0,GW,GH);
+  ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(0,0,GW,GH);
   ctx.textAlign = 'center';
-  ctx.fillStyle = C.uiAccent;
-  ctx.font = 'bold 20px serif';
+  ctx.fillStyle = C.uiAccent; ctx.font = 'bold 20px serif';
   ctx.fillText('暂 停', GW/2, GH/2 - 10);
-  ctx.font = '9px monospace';
-  ctx.fillStyle = C.uiText;
+  ctx.font = '9px monospace'; ctx.fillStyle = C.uiText;
   ctx.fillText('按 ESC 或 ENTER 继续', GW/2, GH/2 + 14);
   ctx.fillText('按 R 重新开始本局', GW/2, GH/2 + 28);
   ctx.textAlign = 'left';
+}
+
+function wrapText(text, maxChars){
+  const lines = []; let cur = '';
+  for (const ch of text){ cur += ch; if (cur.length >= maxChars){ lines.push(cur); cur = ''; } }
+  if (cur) lines.push(cur);
+  return lines;
 }
 
 function drawTransition(){
@@ -1403,19 +1332,15 @@ function drawTransition(){
   else if (t > 0.8) alpha = (1-t)/0.2;
   else alpha = 1;
 
-  ctx.fillStyle = 'rgba(255,220,160,'+(alpha*0.5)+')';
-  ctx.fillRect(0,0,GW,GH);
-  ctx.fillStyle = 'rgba(4,4,12,'+(alpha*0.7)+')';
-  ctx.fillRect(0,0,GW,GH);
+  ctx.fillStyle = 'rgba(255,220,160,'+(alpha*0.5)+')'; ctx.fillRect(0,0,GW,GH);
+  ctx.fillStyle = 'rgba(4,4,12,'+(alpha*0.7)+')'; ctx.fillRect(0,0,GW,GH);
 
   ctx.globalAlpha = alpha;
   ctx.textAlign = 'center';
-  ctx.fillStyle = C.uiAccent;
-  ctx.font = 'bold 24px serif';
+  ctx.fillStyle = C.uiAccent; ctx.font = 'bold 24px serif';
   ctx.fillText(G.transitionText, GW/2, GH/2 - 8);
   if (G.transitionSub){
-    ctx.font = '9px monospace';
-    ctx.fillStyle = C.uiText;
+    ctx.font = '9px monospace'; ctx.fillStyle = C.uiText;
     const lines = wrapText(G.transitionSub, 60);
     for (let i=0;i<lines.length;i++) ctx.fillText(lines[i], GW/2, GH/2 + 14 + i*12);
   }
@@ -1424,15 +1349,12 @@ function drawTransition(){
 }
 
 function drawGameOver(){
-  ctx.fillStyle = 'rgba(0,0,0,0.75)';
-  ctx.fillRect(0,0,GW,GH);
+  ctx.fillStyle = 'rgba(0,0,0,0.78)'; ctx.fillRect(0,0,GW,GH);
   ctx.textAlign = 'center';
-  ctx.fillStyle = C.danger;
-  ctx.font = 'bold 24px serif';
+  ctx.fillStyle = C.danger; ctx.font = 'bold 24px serif';
   ctx.fillText('灯 灭 了', GW/2, GH*0.35);
 
-  ctx.fillStyle = C.uiText;
-  ctx.font = '9px monospace';
+  ctx.fillStyle = C.uiText; ctx.font = '9px monospace';
   ctx.fillText('你在第 ' + G.night + ' 夜倒下', GW/2, GH*0.42);
   ctx.fillText('得分: ' + G.score, GW/2, GH*0.46);
   ctx.fillText('记忆碎片: ' + G.memoryCount, GW/2, GH*0.50);
@@ -1446,18 +1368,14 @@ function drawGameOver(){
 }
 
 function drawVictory(){
-  ctx.fillStyle = 'rgba(255,220,160,0.15)';
-  ctx.fillRect(0,0,GW,GH);
-  ctx.fillStyle = 'rgba(0,0,0,0.4)';
-  ctx.fillRect(0,0,GW,GH);
+  ctx.fillStyle = 'rgba(255,220,160,0.15)'; ctx.fillRect(0,0,GW,GH);
+  ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillRect(0,0,GW,GH);
 
   ctx.textAlign = 'center';
-  ctx.fillStyle = C.transition;
-  ctx.font = 'bold 26px serif';
+  ctx.fillStyle = C.transition; ctx.font = 'bold 26px serif';
   ctx.fillText('天 亮 了', GW/2, GH*0.32);
 
-  ctx.fillStyle = C.uiText;
-  ctx.font = '9px monospace';
+  ctx.fillStyle = C.uiText; ctx.font = '9px monospace';
   ctx.fillText('你守住了三夜', GW/2, GH*0.40);
   ctx.fillText('得分: ' + G.score, GW/2, GH*0.44);
   ctx.fillText('记忆碎片: ' + G.memoryCount + ' / 10', GW/2, GH*0.48);
@@ -1479,18 +1397,7 @@ function drawVictory(){
   ctx.textAlign = 'left';
 }
 
-function wrapText(text, maxChars){
-  const lines = [];
-  let cur = '';
-  for (const ch of text){
-    cur += ch;
-    if (cur.length >= maxChars){ lines.push(cur); cur = ''; }
-  }
-  if (cur) lines.push(cur);
-  return lines;
-}
-
-/* ---------- 18. 主渲染 ---------- */
+/* ---------- 主渲染 ---------- */
 function drawWorldScene(){
   drawSky();
   drawMountains();
@@ -1501,17 +1408,16 @@ function drawWorldScene(){
   for (const s of shadows) drawShadow(s);
   drawPulses();
   if (player) drawPlayer();
-  drawParticles();
-  drawDarkness();
+  drawParticlesWorld();     // 世界内粒子在遮罩之前
+  drawDarkness();           // ← 关键修复：离屏遮罩
   drawWarmGlow();
   drawEdgeWarning();
+  drawFloatTexts();         // 飘字在遮罩之后，保证可见
   if (G.state !== 'gameover' && G.state !== 'victory' && G.state !== 'transition') drawHUD();
 }
 
 function render(){
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0,0,GW,GH);
-
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,GW,GH);
   ctx.save();
   if (G.shake > 0){
     ctx.translate((Math.random()-0.5)*G.shake*2, (Math.random()-0.5)*G.shake*2);
@@ -1537,7 +1443,7 @@ function render(){
   ctx.strokeRect(0.5, 0.5, GW-1, GH-1);
 }
 
-/* ---------- 19. 主循环 ---------- */
+/* ---------- 主循环 ---------- */
 let lastTime = 0;
 function loop(t){
   if (!lastTime) lastTime = t;
@@ -1549,7 +1455,7 @@ function loop(t){
   requestAnimationFrame(loop);
 }
 
-/* ---------- 20. 启动 ---------- */
+/* ---------- 启动 ---------- */
 function boot(){
   generateStars();
   generateMountains();
